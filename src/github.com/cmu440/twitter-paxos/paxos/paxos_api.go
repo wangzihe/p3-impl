@@ -1,1 +1,2 @@
+// paxos interface
 package paxos
