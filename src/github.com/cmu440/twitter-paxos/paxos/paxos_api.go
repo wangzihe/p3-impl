@@ -1,4 +1,4 @@
-// Implementation for paxos
+// paxos interface
 package paxos
 
 type Paxos interface {
@@ -11,10 +11,6 @@ type Paxos interface {
 	// accept phase. It will return true when a majority of nodes
 	// reply accept-ok. Otherwise, it will return false.
 	Accept() (bool, error)
-
-	// This function is used by a leader to commit a value after
-	// a successful accept phase.
-	CommitVal() error
 
 	// This function is used by a leader upon receiving a prepare
 	// response from an acceptor. It will react corresponding to
