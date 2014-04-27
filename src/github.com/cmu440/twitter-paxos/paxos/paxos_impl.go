@@ -10,8 +10,10 @@ import (
 //"net/http"
 //"net/rpc"
 //"sort"
-//"strconv"
-//"time"
+    "strconv"
+    "strings"
+    "sync"
+    "time"
 
 //"github.com/cmu440/tribbler/libstore"
 //"github.com/cmu440/tribbler/rpc/tribrpc"
@@ -24,80 +26,75 @@ const (
     None = iota
 	Prepare
 	Accept
+    PrepareReply
+    AcceptReply
 )
 
 type paxosStates struct {
-	numNodes, numAcc, numrej    int
-	phase                       Phase
-	nodes                       []string
-    acced                       map[string]bool // if HostPort accepted prop
-    //
-    accedMutex, accingMutex     *sync.Mutex
-    accChan                     chan bool
-	myPort                      int
+    // the following are constant once NewPaxos is called
+    nodes                       []string    // list of all HostPorts
     myHostPort                  string
-    myProp                      proposal
-    myAccs                      map[int]bool
+	myPort, numNodes            int
+
+    accedMutex                  *sync.Mutex // protects the following variables
+	numAcc, numRej    int
+	phase                       Phase
+    acced                       map[string]bool // if HostPort accepted prop
+
+    accingMutex                 *sync.Mutex // protects the following variables
     n_h                         int     // highest seqNum seen so far
-    n_a                         int
-    v_a                         string
+    n_a                         int     // highest seqNum accepted; -1 if none seen
+    v_a                         string  // value associated with n_a
+
+    accChan                     chan bool // channel for reporting quorum
 }
 
-type proposal struct {
-    p Phase
-	HostPort    string
-    seqNum int
-	key, value   string
-}
-
-type response struct {
+type p_message struct {
+    p           Phase
 	HostPort    string
     seqNum      int
-	value  string
     acc         bool
+    val         string
 }
 
 // This function creates a paxos package for storage server to use.
 // nodes is an array of host:port strings
-func NewPaxos(myPort int, nodes []string) (PaxosStates, error) {
-	pState := &paxosStates{isLeader: false, nodes: nodes, numNodes: len(nodes)}
-	pState.myPort = myPort
+func NewPaxosStates(myHostPort string, nodes []string) (PaxosStates, error) {
+	ps := &paxosStates{nodes: nodes, numNodes: len(nodes)}
+    var err error
+	ps.myPort, err = strconv.Atoi(strings.Split(myHostPort,":")[1])
+    if err != nil {
+        return nil, err
+    }
 
-	return pState
+	return ps, nil
 }
 
 // This function is used by a node to make a new proposal
 // to other nodes. It will return true when a proposal is
 // being successfully made. Otherwise, it will return false.
-func (ps *paxosStates) Prepare(key, val string) (bool, error) {
-
-	prop := &proposal{p: Prepare, HostPort: ps.myHostPort, key: key, val: val}
+func (ps *paxosStates) Prepare(HostPorts []string, msg []byte) (bool, error) {
 
     // generate a sequence number, ensured to be unique
-    accingMutex.Lock()
-	prop.seqNum = ps.numNodes*(1 + (n_h/ps.numNodes)) + ps.myPort
-    // an alternative: = time.Now().UnixNano()*ps.numNodes + ps.myPort
-    ps.n_h = prop.seqNum
-    accingMutex.Unlock()
+    ps.accingMutex.Lock()
+	// prop.seqNum = ps.numNodes*(1 + (n_h/ps.numNodes)) + ps.myPort
+    // TODO: move this to createPrepareMsg ps.n_h = prop.seqNum
+    ps.accingMutex.Unlock()
 
     // set phase
-    accedMutex.Lock()
+    ps.accedMutex.Lock()
     ps.phase = Prepare
-    accedMutex.Unlock()
+    ps.accedMutex.Unlock()
 
-	marshalled, err := json.Marshal(prop)
-	if err != nil {
-		return false, err
-	}
-    for i := 0; i < len(ps.nodes) {
+    for i := 0; i < len(ps.nodes); i++ {
 	    // send marshalled to ith node
     }
 
-    toReturn = false
+    toReturn := false
 
     select {
-	case _ <-time.after(time.Second): // for now, just time out after 1 second
-    case acc <- ps.accChan:
+	case <-time.After(time.Second): // for now, just time out after 1 second
+    case acc := <-ps.accChan:
         if acc {
             // TODO: anything else?
             toReturn = true
@@ -111,62 +108,80 @@ func (ps *paxosStates) Prepare(key, val string) (bool, error) {
 // accept phase. It will return true when a majority of nodes
 // reply accept-ok. Otherwise, it will return false.
 func (ps *paxosStates) Accept(key, val string) (bool, error) {
+    return false, nil
 }
 
 // This function is used by a leader to commit a value after
 // a successful accept phase.
-func (ps *paxosStates) commitVal(prop proposal) error {
+func (ps *paxosStates) commitVal(msg p_message) error {
+    return nil
+}
+
+func (ps *paxosStates) Interpret_message(marshalled []byte) error {
+    return nil
 }
 
 // This function is used by a leader upon receiving a prepare
 // response from an acceptor. It will react corresponding to
 // the message and make updates to the current state.
-func (ps *paxosStates) ReceivePrepareResponse(resp response) {
-    ps.acceptedMutex.Lock()
+func (ps *paxosStates) receivePrepareResponse(msg p_message) {
+    ps.accedMutex.Lock()
     if ps.phase == Prepare {
-        if ps.myProp.seqNum == r.seqNum {
-            if _, pres := ps.accepted[r.HostPort]; !pres {
-                ps.accepted[r.HostPort] = resp.acc
-                if resp.acc {
+        // TODO: if ps.myProp.seqNum == msg.seqNum {
+            if _, pres := ps.acced[msg.HostPort]; !pres {
+                ps.acced[msg.HostPort] = msg.acc
+                if msg.acc {
                     ps.numAcc++
                 } else {
                     ps.numRej++
                 }
             }
+        // }
         if 2*ps.numAcc > ps.numNodes { // proposal accepted
             ps.accChan <- true
         } else if 2*ps.numRej > ps.numNodes { // proposal rejected
             ps.accChan <- false
         }
     }
-    ps.acceptedMutex.Unlock()
+    ps.accedMutex.Unlock()
 }
 
 // This function is used by a leader upon receiving an accept
 // response from an acceptor. It will react corresponding to
 // the message and make updates to the current state.
-func (ps *paxosStates) ReceiveAcceptResponse() {
+func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
+    return
 }
 
 // This function is used by an acceptor to react to a prepare
 // message. It will react corresponding to the current state.
-func (ps *paxosStates) ReceivePropose(prop proposal) {
-    resp := &response{HostPort: ps.HostPort}
-    accingLock.Lock()
-    if proposal.seqNum > ps.n_h { // accept
+func (ps *paxosStates) receivePropose(msg p_message) {
+    resp := &p_message{HostPort: ps.myHostPort}
+    ps.accingMutex.Lock()
+    if msg.seqNum > ps.n_h { // accept
         resp.acc = true
-        resp.value = v_a
-        resp.seqNum = n_a
-        ps.n_h = proposal.seqNum
+        resp.val = ps.v_a
+        resp.seqNum = ps.n_a
+        ps.n_h = msg.seqNum
     } else { // reject
         resp.acc = false
     }
-    accingLock.Unlock()
+    ps.accingMutex.Unlock()
 }
 
 // This function is used by an acceptor to react to an accept
 // message. It will react corresponding to the current state.
-func (ps *paxosStates) ReceiveAccept(prop proposal) {
-    if n_h > prop.seqNum {
+func (ps *paxosStates) receiveAccept(msg p_message) {
+    if ps.n_h > msg.seqNum {  // reject
+    } else {    // accept
     }
+}
+
+func (ps *paxosStates) CreatePrepareMsg() ([]byte, error) {
+	msg := &p_message{p: Prepare, HostPort: ps.myHostPort}
+	return json.Marshal(msg)
+}
+
+func (ps *paxosStates) CreateAcceptMsg(val string) ([]byte, error) {
+    return nil, nil
 }
