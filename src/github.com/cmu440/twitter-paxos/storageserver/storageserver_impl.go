@@ -25,6 +25,8 @@ const (
 	serverBufSize int    = 1500 // buffer size for reading server message
 	TIMEOUT       int64  = 10   // time out for ping
 	RETRY         int    = 5    // number of times to retry during ping
+	RPCPORT       int    = 0    // configuration file type (contains port for rpc)
+	MSGPORT       int    = 1    // configuration file type. (contains port for messaging)
 	PING_ASK      Status = iota + 1
 	PING_REPLY
 	PREPARE
@@ -37,12 +39,15 @@ const (
 )
 
 type storageServer struct {
-	Hostport    string       // string for host:port
-	Config      string       // path to the configuration file
-	ServerPorts *list.List   // list of storage server port strings
-	Ln          net.Listener // listen socket
-	pingChan    chan string  // channel for ping messages between network handler and server
-	LOGV        *log.Logger  // server logger
+	PortRPC        string       // port string for RPC
+	PortMsg        string       // port string for message passing
+	Config         string       // path to the configuration file
+	ServerRPCPorts *list.List   // list of storage server rpc port strings
+	ServerMsgPorts *list.List   // list of storage server message port strings
+	RPCListener    net.Listener // listen socket for rpc
+	MsgListener    net.Listener // listen socket for messages
+	pingChan       chan string  // channel for ping messages between network handler and server
+	LOGV           *log.Logger  // server logger
 }
 
 // Server message. Servers will send marshalled string of
@@ -57,8 +62,9 @@ type serverMsg struct {
 // This function parses the configuration file that contains all port
 // string for all the storage servers in the network and store those string
 // into a list.
-func (ss *storageServer) parseConfigFile() error {
-	f, err := os.Open(ss.Config)
+func (ss *storageServer) parseConfigFile(config string,
+	configType int) error {
+	f, err := os.Open(config)
 	if err != nil {
 		ss.LOGV.Printf("parseConfigFile: error while opening file %s. %s\n", ss.Config, err)
 		return err
@@ -67,7 +73,11 @@ func (ss *storageServer) parseConfigFile() error {
 	reader := bufio.NewReader(f)
 	scanner := bufio.NewScanner(reader)
 	for scanner.Scan() {
-		ss.ServerPorts.PushBack(scanner.Text())
+		if configType == RPCPORT {
+			ss.ServerRPCPorts.PushBack(scanner.Text())
+		} else {
+			ss.ServerMsgPorts.PushBack(scanner.Text())
+		}
 	}
 	if err = scanner.Err(); err != nil {
 		ss.LOGV.Printf("parseConfigFile: scanner error. %s\n", err)
@@ -235,9 +245,8 @@ func (ss *storageServer) pingServers() bool {
 */
 
 // This is the handler to handle messages received by the server.
-/*
 func (ss *storageServer) networkHandler() {
-	listener := ss.Ln
+	listener := ss.MsgListener
 
 	for {
 		conn, err := listener.Accept()
@@ -272,7 +281,6 @@ func (ss *storageServer) networkHandler() {
 		}
 	}
 }
-*/
 
 // This function sends ping messages to all other storage servers
 // in the network to make sure they have all successfully started.
@@ -280,9 +288,9 @@ func (ss *storageServer) networkHandler() {
 // gives up and returns error. The function will return true when
 // all servers are running. False otherwise.
 func (ss *storageServer) pingServers() bool {
-	for e := ss.ServerPorts.Front(); e != nil; e = e.Next() {
+	for e := ss.ServerRPCPorts.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
-		if port == ss.Hostport {
+		if port == ss.PortRPC {
 			continue
 		}
 		ss.LOGV.Printf("ping server %s\n", port)
@@ -315,32 +323,45 @@ func (ss *storageServer) pingServers() bool {
 }
 
 // This function creates a new storage server.
-// port: port string of the storage server
-// config: path to the configuration file for the server. The
-//         configuration file contains the list of storage servers.
-func NewStorageServer(port, config string) (StorageServer, error) {
+// portRPC: RPC port string of the storage server
+// portMsg: message port string of the storage server
+// configRPC: path to the configuration file for the server. The
+//            configuration file contains the list of rpc ports
+//            of storage servers.
+// configMsg: path to the configuration file for the server. The
+//            configuration file contains the list of message ports
+//            of storage servers.
+func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageServer, error) {
 	fmt.Printf("new storage server created\n")
 	server := new(storageServer)
-	server.Hostport = port
-	server.Config = config
-	server.ServerPorts = list.New()
+	server.PortRPC = portRPC
+	server.PortMsg = portMsg
+	server.ServerRPCPorts = list.New()
+	server.ServerMsgPorts = list.New()
 	// create log file for server
-	filename := port + ".txt"
+	filename := portRPC + ".txt"
 	logFile, _ := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
 	server.LOGV = log.New(logFile, "VERBOSE", log.Lmicroseconds|log.Lshortfile)
-	server.LOGV.Printf("starting storage server %s\n", port)
+	server.LOGV.Printf("starting storage server on RPC port %s and msg port %s\n", portRPC, portMsg)
 
 	// parse configuration file
-	server.parseConfigFile()
-	server.LOGV.Printf("NewStorageServer: port is %s\n", port)
-	// set up listen socket
-	listenPort := ":" + port
-	ln, err := net.Listen("tcp", listenPort)
+	server.parseConfigFile(configRPC, RPCPORT)
+	server.parseConfigFile(configMsg, MSGPORT)
+	// set up listen sockets
+	RPCListenPort := ":" + portRPC
+	rpcLn, err := net.Listen("tcp", RPCListenPort)
 	if err != nil {
-		server.LOGV.Printf("NewStorageServer: error while creating listen socket. %s\n", err)
+		server.LOGV.Printf("NewStorageServer: error while creating listen socket for rpc. %s\n", err)
 		return nil, err
 	}
-	server.Ln = ln
+	server.RPCListener = rpcLn
+	msgListenPort := ":" + portMsg
+	msgLn, err := net.Listen("tcp", msgListenPort)
+	if err != nil {
+		server.LOGV.Printf("NewStorageServer: error while creating message listen socket.\n", err)
+		return nil, err
+	}
+	server.MsgListener = msgLn
 
 	// Wrap the storageserver before registering it for RPC
 	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(server))
@@ -349,11 +370,12 @@ func NewStorageServer(port, config string) (StorageServer, error) {
 		return nil, err
 	}
 	rpc.HandleHTTP()
-	go http.Serve(ln, nil)
+	go http.Serve(rpcLn, nil)
 
+	go server.networkHandler()
 	// ping all other storage servers
 	/*
-		go server.networkHandler()
+
 		if server.pingServers() == false {
 			server.LOGV.Printf("some servers failed to start\n")
 			server.Ln.Close()
@@ -364,7 +386,8 @@ func NewStorageServer(port, config string) (StorageServer, error) {
 	*/
 	if server.pingServers() == false {
 		server.LOGV.Printf("some servers failed to start\n")
-		server.Ln.Close()
+		server.RPCListener.Close()
+		server.MsgListener.Close()
 		return nil, errors.New("not all servers exist")
 	}
 
