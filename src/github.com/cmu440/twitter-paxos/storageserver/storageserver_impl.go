@@ -108,14 +108,24 @@ func makeMsg(msgType Status, value string, proposalID string) *serverMsg {
 	}
 }
 
+// This function converts a server message struct to a string ended with
+// "\n" and then convert that string into a series of bytes. This allows
+// us to send the marshalled server message through network.
+func wrapMsg(msg *serverMsg) ([]byte, error) {
+	msgB, err := json.Marshal(*msg)
+	if err != nil {
+		return nil, err
+	}
+	temp := string(msgB) + "\n"
+	return []byte(temp), nil
+}
+
 // This is the go routine that will get ping response from a particular
-// server. Notice that it is possible that it will receive ping request
-// from other servers too. In this case, it will return a ping response.
-//
+// server.
 // sigChan Channel to send signal back to main thread
+// conn    Client connection that the particular server
 func (ss *storageServer) getPingResponse(sigChan chan struct{},
 	conn net.Conn) {
-
 	msgType, _, _, err := readMsg(conn)
 	if err != nil {
 		ss.LOGV.Printf("getPingResponse: error while reading server message. %s\n", err)
@@ -124,79 +134,42 @@ func (ss *storageServer) getPingResponse(sigChan chan struct{},
 	if msgType == PING_REPLY {
 		ss.LOGV.Printf("getPingResponse: received a ping response.\n")
 		sigChan <- struct{}{}
+		conn.Close()
 		return
 	}
 }
 
-func (ss *storageServer) receivePingRequest() {
-	listener := ss.Ln
-
-	for {
-		ss.LOGV.Printf("start to receive requests\n")
-		conn, err := listener.Accept()
-		if err != nil {
-			// listen socket is closed by the main thread. terminate
-			conn.Close()
-			fmt.Printf("receivePingRequest: terminate\n")
-			return
-		} else {
-			msgType, _, _, err := readMsg(conn)
-			if err != nil {
-				ss.LOGV.Printf("receivePingRequest: error while reading message. %s\n", err)
-				fmt.Printf("receivePingRequest: terminate\n")
-				conn.Close()
-				return
-			}
-			ss.LOGV.Printf("receivePingRequest: received a messgae\n")
-			if msgType == PING_ASK {
-				// received ping message from other servers, send reply
-				ss.LOGV.Printf("receivePingRequest: received a ping message\n")
-				response := makeMsg(PING_REPLY, "", "")
-				responseB, err := json.Marshal(*response)
-				if err != nil {
-					ss.LOGV.Printf("receivePingRequest: error while marshalling ping response. %s\n", err)
-				} else {
-					temp := string(responseB) + "\n"
-					_, err = conn.Write([]byte(temp))
-					if err != nil {
-						ss.LOGV.Printf("receivePingRequest: error sending response. %s\n", err)
-					}
-					// TODO should we close conn here?
-					conn.Close()
-					ss.LOGV.Printf("receivePingRequest: send out ping response\n")
-				}
-			}
-		}
-	}
-}
-
 // This go routine implements ping timeout. After TIME_OUT seconds,
-// it will send a signal to main thread.
+// it will send a signal to main thread through a timeout channel.
 func (ss *storageServer) pingTimeout(timeoutChan chan struct{}) {
 	time.Sleep(time.Duration(TIMEOUT) * time.Second)
 	timeoutChan <- struct{}{}
-	fmt.Printf("pingTimeout: terminate\n")
+	ss.LOGV.Printf("pingTimeout: terminate\n")
 }
 
 // This function pings a particular server. It inputs a port number for the
 // particular server it wants to ping. If there is any error occurred or a
 // timeout happens, it will return false. Otherwise, it will return true.
 func (ss *storageServer) ping(port string) bool {
-
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:"+port)
 	if err != nil {
 		ss.LOGV.Printf("ping: error occurred while pinging server %s.%s\n", port, err)
+		// sleep for TIMEOUT seconds before returning. Give some time
+		// before another retry
+		time.Sleep(time.Duration(TIMEOUT) * time.Second)
 		return false
 	} else {
 		conn, err := net.DialTCP("tcp", nil, tcpAddr)
 		if err != nil {
 			ss.LOGV.Printf("ping: error occurred while contacting server %s. %s\n", port, err)
+			// sleep for TIMEOUT seconds before returning. Give some time
+			// before another retry
+			time.Sleep(time.Duration(TIMEOUT) * time.Second)
 			return false
 		}
 		msg := makeMsg(PING_ASK, "", "")
-		msgB, err := json.Marshal(*msg)
-		temp := string(msgB) + "\n"
-		_, err = conn.Write([]byte(temp))
+		msgB, _ := wrapMsg(msg)
+		_, err = conn.Write(msgB)
 		if err != nil {
 			ss.LOGV.Printf("ping: error occurred while messaging server %s. %s\n", port, err)
 			conn.Close()
@@ -211,7 +184,6 @@ func (ss *storageServer) ping(port string) bool {
 		select {
 		case <-sigChan:
 			// received ping response
-			fmt.Printf("here\n")
 			conn.Close()
 			return true
 		case <-timeoutChan:
@@ -236,7 +208,7 @@ func (ss *storageServer) pingServers() bool {
 		ss.LOGV.Printf("ping server %s\n", port)
 		var fail bool = true
 		for index := 0; index < RETRY; index++ {
-			fmt.Printf("ping\n")
+			ss.LOGV.Printf("ping\n")
 			success := ss.ping(port)
 			if success == true {
 				fail = false
@@ -256,10 +228,10 @@ func (ss *storageServer) networkHandler() {
 	listener := ss.Ln
 
 	for {
-		//TODO do we need to keep the connection or close it?
 		conn, err := listener.Accept()
 		if err != nil {
 			// listen socket is closed by the main thread
+			return
 		} else {
 			// read server message
 			msgType, _, _, errR := readMsg(conn)
@@ -268,8 +240,18 @@ func (ss *storageServer) networkHandler() {
 			} else {
 				switch msgType {
 				case PING_ASK:
-					// received a ping message from another server
-
+					// received ping message from other servers, send reply
+					ss.LOGV.Printf("networkHandler: received a ping message\n")
+					response := makeMsg(PING_REPLY, "", "")
+					responseB, _ := wrapMsg(response)
+					temp := string(responseB) + "\n"
+					_, err = conn.Write([]byte(temp))
+					if err != nil {
+						ss.LOGV.Printf("networkHandler: error sending response. %s\n", err)
+					}
+					// TODO should we close conn here?
+					conn.Close()
+					ss.LOGV.Printf("networkHandler: send out ping response\n")
 				case PING_REPLY:
 					// received a ping response
 					ss.LOGV.Printf("received a ping response\n")
@@ -308,8 +290,7 @@ func NewStorageServer(port, config string) (StorageServer, error) {
 	server.Ln = ln
 
 	// ping all other storage servers
-	go server.receivePingRequest()
-	time.Sleep(2 * time.Second) // sleep for 1 second before pinging
+	go server.networkHandler()
 	if server.pingServers() == false {
 		server.LOGV.Printf("some servers failed to start\n")
 		server.Ln.Close()
