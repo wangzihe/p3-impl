@@ -3,6 +3,7 @@ package paxos
 
 import (
     "encoding/json"
+    "errors"
 //"fmt"
 //"io/ioutil"
 //"log"
@@ -34,23 +35,23 @@ type paxosStates struct {
     // the following are constant once NewPaxos is called
     nodes                       []string    // list of all HostPorts
     myHostPort                  string
-	myPort, numNodes            int
+	myID, numNodes              int
 
     accedMutex                  *sync.Mutex // protects the following variables
 	numAcc, numRej    int
 	phase                       Phase
-    acced                       map[string]bool // if HostPort accepted prop
 
     accingMutex                 *sync.Mutex // protects the following variables
     n_h                         int     // highest seqNum seen so far
-    n_a                         int     // highest seqNum accepted; -1 if none seen
+    n_a                         int     // highest seqNum accepted; -1 if none
     v_a                         string  // value associated with n_a
+    mySeqNum                    int     // seqNum of my proposal if proposing
 
     accChan                     chan bool // channel for reporting quorum
 }
 
 type p_message struct {
-    p           Phase
+    mtype        Phase
 	HostPort    string
     seqNum      int
     acc         bool
@@ -58,14 +59,15 @@ type p_message struct {
 }
 
 // This function creates a paxos package for storage server to use.
-// nodes is an array of host:port strings
+// nodes is an array of all host:port strings; this needs to be identical for
+// each call to newPaxosStates (i.e., for each server), because it is used to
+// generate the node's ID number, which in turn ensures that sequence numbers
+// are unique to that node
 func NewPaxosStates(myHostPort string, nodes []string) (PaxosStates, error) {
 	ps := &paxosStates{nodes: nodes, numNodes: len(nodes)}
-    var err error
-	ps.myPort, err = strconv.Atoi(strings.Split(myHostPort,":")[1])
-    if err != nil {
-        return nil, err
+    for i := 0; nodes[i] != myHostPort; i++ {
     }
+    myID = i
 
 	return ps, nil
 }
@@ -74,12 +76,6 @@ func NewPaxosStates(myHostPort string, nodes []string) (PaxosStates, error) {
 // to other nodes. It will return true when a proposal is
 // being successfully made. Otherwise, it will return false.
 func (ps *paxosStates) Prepare(HostPorts []string, msg []byte) (bool, error) {
-
-    // generate a sequence number, ensured to be unique
-    ps.accingMutex.Lock()
-	// prop.seqNum = ps.numNodes*(1 + (n_h/ps.numNodes)) + ps.myPort
-    // TODO: move this to createPrepareMsg ps.n_h = prop.seqNum
-    ps.accingMutex.Unlock()
 
     // set phase
     ps.accedMutex.Lock()
@@ -117,8 +113,25 @@ func (ps *paxosStates) commitVal(msg p_message) error {
     return nil
 }
 
+// unmarshalls and determines the type of a p_message
+// and calls the appropriate handler function
 func (ps *paxosStates) Interpret_message(marshalled []byte) error {
-    return nil
+    var msg p_message
+	err = json.Unmarshal(marshalled, &msg)
+	if err != nil {
+		return err
+	}
+    switch msg.mtype
+    case None:
+        return errors.New("Invalid msg state: None")
+	case Prepare:
+        ps.receiveProposal(msg)
+	case Accept:
+        ps.receiveAcceptReq(msg)
+    case PrepareReply:
+        ps.receivePrepareResponse(msg)
+    case AcceptReply:
+        ps.receiveAcceptResponse(msg)
 }
 
 // This function is used by a leader upon receiving a prepare
@@ -127,16 +140,13 @@ func (ps *paxosStates) Interpret_message(marshalled []byte) error {
 func (ps *paxosStates) receivePrepareResponse(msg p_message) {
     ps.accedMutex.Lock()
     if ps.phase == Prepare {
-        // TODO: if ps.myProp.seqNum == msg.seqNum {
-            if _, pres := ps.acced[msg.HostPort]; !pres {
-                ps.acced[msg.HostPort] = msg.acc
-                if msg.acc {
-                    ps.numAcc++
-                } else {
-                    ps.numRej++
-                }
-            }
-        // }
+        if ps.mySeqNum == msg.seqNum {
+           if msg.acc {
+               ps.numAcc++
+           } else {
+               ps.numRej++
+           }
+        }
         if 2*ps.numAcc > ps.numNodes { // proposal accepted
             ps.accChan <- true
         } else if 2*ps.numRej > ps.numNodes { // proposal rejected
@@ -155,7 +165,7 @@ func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
 
 // This function is used by an acceptor to react to a prepare
 // message. It will react corresponding to the current state.
-func (ps *paxosStates) receivePropose(msg p_message) {
+func (ps *paxosStates) receiveProposal(msg p_message) {
     resp := &p_message{HostPort: ps.myHostPort}
     ps.accingMutex.Lock()
     if msg.seqNum > ps.n_h { // accept
@@ -171,17 +181,37 @@ func (ps *paxosStates) receivePropose(msg p_message) {
 
 // This function is used by an acceptor to react to an accept
 // message. It will react corresponding to the current state.
-func (ps *paxosStates) receiveAccept(msg p_message) {
+func (ps *paxosStates) receiveAccept(msg p_message) error {
     if ps.n_h > msg.seqNum {  // reject
+        reply := &p_message{mtype: AcceptReply, acc: false}
     } else {    // accept
+        ps.n_a = msg.seqNum
+        ps.v_a = msg.val
+        ps.n_h = msg.seqNum
+        reply := &p_message{mtype: AcceptReply, acc: true}
     }
+    // TODO: send reply the msg.HostPort
+    marshalled, err := json.Marshal(msg)
+    if err
 }
 
+// returns a marshalled Prepare p_message with (hopefully) a highest new seqNum
 func (ps *paxosStates) CreatePrepareMsg() ([]byte, error) {
-	msg := &p_message{p: Prepare, HostPort: ps.myHostPort}
+    // generate a sequence number, ensured to be unique by
+    // taking next multiple of numNodes and adding myID
+    ps.accingMutex.Lock()
+	ps.n_h = ps.numNodes*(1 + (n_h/ps.numNodes)) + ps.myID
+    ps.mySeqNum = ps.n_h
+	msg := &p_message{mtype: Prepare, HostPort: ps.myHostPort, seqNum: ps.n_h}
+    ps.accingMutex.Unlock()
+
 	return json.Marshal(msg)
 }
 
+// returns a marshalled Accept p_message with value val and my proposal seqNum
 func (ps *paxosStates) CreateAcceptMsg(val string) ([]byte, error) {
-    return nil, nil
+    ps.accingMutex.Lock()   // probably uneccesary (for seqNum)
+	msg := &p_message{mtype: Accept, HostPort: ps.myHostPort, seqNum: ps.mySeqNum, val: val}
+    ps.accingMutex.Unlock()
+	return json.Marshal(msg)
 }
