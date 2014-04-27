@@ -8,15 +8,17 @@ import (
 )
 
 var (
-	port       = flag.Int("port", 9090, "Storage server port number")
-	configPath = "./config.txt"
-	numNodes   = 2
+	rpcPort       = flag.Int("rpc", 9090, "Storage server rpc port number")
+	msgPort       = flag.Int("msg", 9099, "Storage server msg port number")
+	configRPCPath = "./configRPC.txt"
+	configMsgPath = "./configMsg.txt"
 )
 
 func main() {
 	flag.Parse()
 	fmt.Printf("number of args is %d\n", flag.NArg())
-	_, err := storageserver.NewStorageServer(strconv.Itoa(*port), "./config.txt")
+	_, err := storageserver.NewStorageServer(strconv.Itoa(*rpcPort), strconv.Itoa(*msgPort),
+		configRPCPath, configMsgPath)
 	if err != nil {
 		fmt.Printf("error while creating new storage server\n")
 		return
