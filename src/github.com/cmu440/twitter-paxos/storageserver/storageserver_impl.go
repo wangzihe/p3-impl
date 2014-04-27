@@ -9,9 +9,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
+	"net/rpc"
 	"os"
 	"strings"
 	"time"
+
+	"github.com/cmu440/twitter-paxos/rpc/storagerpc"
 )
 
 type Status int
@@ -124,6 +128,7 @@ func wrapMsg(msg *serverMsg) ([]byte, error) {
 // server.
 // sigChan Channel to send signal back to main thread
 // conn    Client connection that the particular server
+/*
 func (ss *storageServer) getPingResponse(sigChan chan struct{},
 	conn net.Conn) {
 	msgType, _, _, err := readMsg(conn)
@@ -137,19 +142,22 @@ func (ss *storageServer) getPingResponse(sigChan chan struct{},
 		conn.Close()
 		return
 	}
-}
+}*/
 
 // This go routine implements ping timeout. After TIME_OUT seconds,
 // it will send a signal to main thread through a timeout channel.
+/*
 func (ss *storageServer) pingTimeout(timeoutChan chan struct{}) {
 	time.Sleep(time.Duration(TIMEOUT) * time.Second)
 	timeoutChan <- struct{}{}
 	ss.LOGV.Printf("pingTimeout: terminate\n")
 }
+*/
 
 // This function pings a particular server. It inputs a port number for the
 // particular server it wants to ping. If there is any error occurred or a
 // timeout happens, it will return false. Otherwise, it will return true.
+/*
 func (ss *storageServer) ping(port string) bool {
 	tcpAddr, err := net.ResolveTCPAddr("tcp", "localhost:"+port)
 	if err != nil {
@@ -193,12 +201,14 @@ func (ss *storageServer) ping(port string) bool {
 		}
 	}
 }
+*/
 
 // This function sends ping messages to all other storage servers
 // in the network to make sure they have all successfully started.
 // For each storage server, it will try up to 5 times before it
 // gives up and returns error. The function will return true when
 // all servers are running. False otherwise.
+/*
 func (ss *storageServer) pingServers() bool {
 	for e := ss.ServerPorts.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -222,8 +232,10 @@ func (ss *storageServer) pingServers() bool {
 
 	return true
 }
+*/
 
 // This is the handler to handle messages received by the server.
+/*
 func (ss *storageServer) networkHandler() {
 	listener := ss.Ln
 
@@ -260,6 +272,47 @@ func (ss *storageServer) networkHandler() {
 		}
 	}
 }
+*/
+
+// This function sends ping messages to all other storage servers
+// in the network to make sure they have all successfully started.
+// For each storage server, it will try up to 5 times before it
+// gives up and returns error. The function will return true when
+// all servers are running. False otherwise.
+func (ss *storageServer) pingServers() bool {
+	for e := ss.ServerPorts.Front(); e != nil; e = e.Next() {
+		port := e.Value.(string)
+		if port == ss.Hostport {
+			continue
+		}
+		ss.LOGV.Printf("ping server %s\n", port)
+		var fail bool = true
+		for index := 0; index < RETRY; index++ {
+			ss.LOGV.Printf("ping\n")
+			cli, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", port))
+			if err != nil {
+				ss.LOGV.Printf("error dialing tcp. %s\n", err)
+				time.Sleep(time.Duration(TIMEOUT) * time.Second)
+				continue
+			} else {
+				var a int = 1
+				var b int = 2
+				err = cli.Call("StorageServer.Ping", &a, &b)
+				if err != nil {
+					ss.LOGV.Printf("error calling commit. %s\n", err)
+					continue
+				} else {
+					fail = false
+					break
+				}
+			}
+		}
+		if fail == true {
+			return false
+		}
+	}
+	return true
+}
 
 // This function creates a new storage server.
 // port: port string of the storage server
@@ -289,18 +342,41 @@ func NewStorageServer(port, config string) (StorageServer, error) {
 	}
 	server.Ln = ln
 
+	// Wrap the storageserver before registering it for RPC
+	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(server))
+	if err != nil {
+		server.LOGV.Printf("NewStorageServer: error while registering rpc. %s\n", err)
+		return nil, err
+	}
+	rpc.HandleHTTP()
+	go http.Serve(ln, nil)
+
 	// ping all other storage servers
-	go server.networkHandler()
+	/*
+		go server.networkHandler()
+		if server.pingServers() == false {
+			server.LOGV.Printf("some servers failed to start\n")
+			server.Ln.Close()
+			return nil, errors.New("not all servers exist")
+		}
+
+		fmt.Printf("finished ping\n")
+	*/
 	if server.pingServers() == false {
 		server.LOGV.Printf("some servers failed to start\n")
 		server.Ln.Close()
 		return nil, errors.New("not all servers exist")
 	}
 
-	fmt.Printf("finished ping\n")
 	return server, nil
 }
 
-func (ss *storageServer) Commit() error {
+func (ss *storageServer) Ping(a, b *int) error {
+	fmt.Printf("ping called\n")
+	return nil
+}
+
+func (ss *storageServer) Commit(a, b *int) error {
+	fmt.Printf("commit called\n")
 	return nil
 }
