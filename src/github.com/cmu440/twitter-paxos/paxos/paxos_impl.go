@@ -10,8 +10,8 @@ import (
 //"net/http"
 //"net/rpc"
 //"sort"
-    //"strconv"
-    //"strings"
+    "strconv"
+    "strings"
     "sync"
     "time"
 
@@ -61,10 +61,11 @@ type p_message struct {
 // nodes is an array of host:port strings
 func NewPaxosStates(myHostPort string, nodes []string) (PaxosStates, error) {
 	ps := &paxosStates{nodes: nodes, numNodes: len(nodes)}
-	// TODO: ps.myPort, err := strconv.Atoi(strings.Split(myHostPort,":")[1])
-    //if err != nil {
-    //    return nil, err
-    //}
+    var err error
+	ps.myPort, err = strconv.Atoi(strings.Split(myHostPort,":")[1])
+    if err != nil {
+        return nil, err
+    }
 
 	return ps, nil
 }
