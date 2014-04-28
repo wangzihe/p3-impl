@@ -4,6 +4,7 @@ package storageserver
 import (
 	"bufio"
 	"container/list"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,9 +13,10 @@ import (
 	"net/http"
 	"net/rpc"
 	"os"
-	"strings"
 	"time"
 
+	"github.com/cmu440/twitter-paxos/message"
+	"github.com/cmu440/twitter-paxos/paxos"
 	"github.com/cmu440/twitter-paxos/rpc/storagerpc"
 )
 
@@ -29,25 +31,20 @@ const (
 	MSGPORT       int    = 1    // configuration file type. (contains port for messaging)
 	PING_ASK      Status = iota + 1
 	PING_REPLY
-	PREPARE
-	PREPARE_OK
-	PREPARE_REJECT
-	ACCEPT
-	ACCPET_OK
-	ACCEPT_REJECT
-	COMMIT
 )
 
 type storageServer struct {
-	PortRPC        string       // port string for RPC
-	PortMsg        string       // port string for message passing
-	Config         string       // path to the configuration file
-	ServerRPCPorts *list.List   // list of storage server rpc port strings
-	ServerMsgPorts *list.List   // list of storage server message port strings
-	RPCListener    net.Listener // listen socket for rpc
-	MsgListener    net.Listener // listen socket for messages
-	pingChan       chan string  // channel for ping messages between network handler and server
-	LOGV           *log.Logger  // server logger
+	PortRPC        string             // port string for RPC
+	PortMsg        string             // port string for message passing
+	Config         string             // path to the configuration file
+	ServerRPCPorts *list.List         // list of storage server rpc port strings
+	ServerMsgPorts *list.List         // list of storage server message port strings
+	RPCListener    net.Listener       // listen socket for rpc
+	MsgListener    net.Listener       // listen socket for messages
+	pingChan       chan string        // channel for ping messages between network handler and server
+	LOGV           *log.Logger        // server logger
+	MsgHandler     message.MessageLib // message handler
+	PaxosHandler   paxos.PaxosStates  // paxos handler
 }
 
 // Server message. Servers will send marshalled string of
@@ -87,29 +84,36 @@ func (ss *storageServer) parseConfigFile(config string,
 	return nil
 }
 
-// This function read a server message from the connection.
-// The function will return type of the message, value embeded
-// inside the message, proposal ID and error if any.
-func readMsg(conn net.Conn) (Status, string, string, error) {
+// This function read a high-level message from the connection.
+// This message can embed a server message or a paxos message.
+// The function will return the byte array for the message embeded
+// inside the high-level message, message type and error
+func (ss *storageServer) readMsg(conn net.Conn) ([]byte, int, error) {
 	reader := bufio.NewReader(conn)
 	msgBytes, err := reader.ReadBytes('\n')
 	if err != nil {
 		// error occurred while reading server message
 		fmt.Printf("readMsg: error while reading server message. %s\n", err)
-		return -1, "", "", err
+		return nil, -1, err
 	}
-	// remove newline from the string read from network
-	temp := string(msgBytes)
-	marshalledMsg := strings.TrimSuffix(temp, "\n")
-	marshalledMsgBytes := []byte(marshalledMsg)
-	// unmarshal the message string and extract content
+	generalMsgB, msgType, err := ss.MsgHandler.RetrieveMsg(msgBytes)
+	if err != nil {
+		return nil, -1, err
+	} else {
+		return generalMsgB, msgType, nil
+	}
+}
+
+// This function is used by server to parse server message. It will
+// return a pointer to the server message struct.
+func (ss *storageServer) parseServerMsg(msgB []byte) *serverMsg {
 	var msg serverMsg
-	err = json.Unmarshal(marshalledMsgBytes, &msg)
+	err := json.Unmarshal(msgB, &msg)
 	if err != nil {
 		fmt.Printf("readMsg: error while unmarshalling. %s\n", err)
-		return -1, "", "", err
+		return nil
 	} else {
-		return msg.MsgType, msg.Value, msg.ProposalID, nil
+		return &msg
 	}
 }
 
@@ -255,26 +259,21 @@ func (ss *storageServer) networkHandler() {
 			return
 		} else {
 			// read server message
-			msgType, _, _, errR := readMsg(conn)
+			msgB, msgType, errR := ss.readMsg(conn)
+
 			if errR != nil {
 				ss.LOGV.Printf("networkHandler: error while reading msg. %s\n", errR)
 			} else {
 				switch msgType {
-				case PING_ASK:
-					// received ping message from other servers, send reply
-					ss.LOGV.Printf("networkHandler: received a ping message\n")
-					response := makeMsg(PING_REPLY, "", "")
-					responseB, _ := wrapMsg(response)
-					temp := string(responseB) + "\n"
-					_, err = conn.Write([]byte(temp))
-					if err != nil {
-						ss.LOGV.Printf("networkHandler: error sending response. %s\n", err)
-					}
-					// TODO should we close conn here?
+				case message.SERVER:
+					// received a server message
+					ss.parseServerMsg(msgB)
 					conn.Close()
-					ss.LOGV.Printf("networkHandler: send out ping response\n")
-				case PING_REPLY:
-					// received a ping response
+				case message.PAXOS:
+					// received a paxos message
+					// TODO use go routine to handle paxos message
+					go ss.PaxosHandler.Interpret_message(msgB)
+					conn.Close()
 					ss.LOGV.Printf("received a ping response\n")
 				}
 			}
@@ -338,6 +337,15 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 	server.PortMsg = portMsg
 	server.ServerRPCPorts = list.New()
 	server.ServerMsgPorts = list.New()
+	server.MsgHandler = message.NewMessageHandler()
+
+	// create database file
+	db, err := sql.Open("sqlite3", "./foo.db")
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer db.Close()
+
 	// create log file for server
 	filename := portRPC + ".txt"
 	logFile, _ := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
@@ -390,6 +398,8 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 		server.MsgListener.Close()
 		return nil, errors.New("not all servers exist")
 	}
+	server.PaxosHandler = paxos.NewPaxosStates(portMsg,
+		server.ServerMsgPorts, server.LOGV)
 
 	return server, nil
 }
