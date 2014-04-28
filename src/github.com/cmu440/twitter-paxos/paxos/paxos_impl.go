@@ -14,6 +14,7 @@ import (
 	//"strings"
 	"container/list"
 	"database/sql"
+	"errors"
 	_ "github.com/mattn/go-sqlite3"
 	"sync"
 
@@ -369,11 +370,11 @@ func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
 
 // This function is used by a leader to commit a value after
 // a successful accept phase.
-func (ps *paxosStates) commitVal() error {
+func (ps *paxosStates) commitVal() (string, error) {
 	// construct commit message
 	msgB, err := ps.CreateCommitMsg()
 	if err != nil {
-		return err
+		return "", err
 	}
 
 	// send prepare message to the network
@@ -381,6 +382,7 @@ func (ps *paxosStates) commitVal() error {
 
 	// commit on its local machine. since this is the only thead
 	// reading v_a, therefore no need to grab the lock.
+	val := ps.v_a
 	tx, err := ps.storage.Begin()
 	if err != nil {
 		ps.logger.Printf("receiveCommit: database error. %s\n", err)
@@ -391,7 +393,7 @@ func (ps *paxosStates) commitVal() error {
 		}
 		defer stmt.Close()
 		if err != nil {
-			_, err := stmt.Exec(ps.v_a, 1)
+			_, err := stmt.Exec(val, 1)
 			if err != nil {
 				ps.logger.Printf("receiveCommit: exec error. %s\n", err)
 			}
@@ -410,7 +412,7 @@ func (ps *paxosStates) commitVal() error {
 	ps.numRej = 0
 	ps.accedMutex.Unlock()
 
-	return nil
+	return val, nil
 }
 
 // This function creates a commit message.
@@ -452,6 +454,49 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 			}
 		}
 		tx.Commit()
+	}
+}
+
+// This function does a commit. It is the only access point for server
+// to communicate with paxos algorithm.
+// This function will return the value committed and error message if any.
+// When error occurs, this function will return an empty string along
+// with an error message.
+//
+//TODO We need to think more about returning error in this function.
+//     Returning error must gurantee that the value won't be committed
+//     in the future without retrying.
+func (ps *paxosStates) PaxosCommit(val string) (string, error) {
+	prepSuccess, err := ps.Prepare()
+	if err != nil {
+		return "", err
+	}
+	if prepSuccess {
+		// Success in Prepare phase. Move on to Accept phase
+		accSuccess, err := ps.Accept(val)
+		if err != nil {
+			return "", err
+		}
+		if accSuccess {
+			// Success in Accept phase. Move on to Commit phase
+			val, err := ps.commitVal()
+			if err != nil {
+				// commit failed
+				return val, err
+			} else {
+				// commit success
+				return val, nil
+			}
+		} else {
+			// Failure in Accept phase.
+			return "", nil
+		}
+	} else {
+		// Failure in Prepare phase.
+		// TODO for now, we will just return error since this value
+		//      will never be commited as the server isn't elected
+		//      as a leader.
+		return "", errors.New("not commit")
 	}
 }
 
