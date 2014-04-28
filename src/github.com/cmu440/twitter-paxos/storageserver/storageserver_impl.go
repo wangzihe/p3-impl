@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	_ "github.com/mattn/go-sqlite3"
 	"log"
 	"net"
 	"net/http"
@@ -340,11 +341,20 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 	server.MsgHandler = message.NewMessageHandler()
 
 	// create database file
-	db, err := sql.Open("sqlite3", "./foo.db")
+	databaseFile := "./storage" + portMsg + ".db"
+	db, err := sql.Open("sqlite3", databaseFile)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer db.Close()
+	sql := `
+		create table if not exists storage (tweet text not null primary key, count int);
+		`
+	_, err = db.Exec(sql)
+	if err != nil {
+		log.Printf("%q: %s\n", err, sql)
+		return nil, err
+	}
 
 	// create log file for server
 	filename := portRPC + ".txt"
@@ -399,7 +409,7 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 		return nil, errors.New("not all servers exist")
 	}
 	server.PaxosHandler = paxos.NewPaxosStates(portMsg,
-		server.ServerMsgPorts, server.LOGV)
+		server.ServerMsgPorts, server.LOGV, db)
 
 	return server, nil
 }

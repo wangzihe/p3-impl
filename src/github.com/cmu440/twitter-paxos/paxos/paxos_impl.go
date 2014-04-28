@@ -13,6 +13,8 @@ import (
 	//"strconv"
 	//"strings"
 	"container/list"
+	"database/sql"
+	_ "github.com/mattn/go-sqlite3"
 	"sync"
 
 	"github.com/cmu440/twitter-paxos/message"
@@ -52,6 +54,7 @@ type paxosStates struct {
 	accChan    chan bool          // channel for reporting quorum during accept phase
 	logger     *log.Logger        // logger for paxos (same as the one for server)
 	msgHandler message.MessageLib // message handler
+	storage    *sql.DB            // database used by storage server
 }
 
 type p_message struct {
@@ -68,8 +71,8 @@ type p_message struct {
 // generate the node's ID number, which in turn ensures that sequence numbers
 // are unique to that node
 func NewPaxosStates(myHostPort string, nodes *list.List,
-	logger *log.Logger) PaxosStates {
-	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len()}
+	logger *log.Logger, storage *sql.DB) PaxosStates {
+	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), storage: storage}
 	var i int = 0
 	for e := nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -372,7 +375,36 @@ func (ps *paxosStates) commitVal() error {
 	// send prepare message to the network
 	ps.broadCastMsg(msgB)
 
-	// TODO commit on its local machine
+	// commit on its local machine. since this is the only thead
+	// reading v_a, therefore no need to grab the lock.
+	tx, err := ps.storage.Begin()
+	if err != nil {
+		ps.logger.Printf("receiveCommit: database error. %s\n", err)
+	} else {
+		stmt, err := tx.Prepare("insert into storage(tweet, count) values(?, ?)")
+		if err != nil {
+			ps.logger.Printf("receiveCommit: database error. %s\n", err)
+		}
+		defer stmt.Close()
+		if err != nil {
+			_, err := stmt.Exec(ps.v_a, 1)
+			if err != nil {
+				ps.logger.Printf("receiveCommit: exec error. %s\n", err)
+			}
+		}
+		tx.Commit()
+	}
+
+	// reset phase variable to None
+	ps.prep_v = "" // no need to grab lock since we are the only one to change it
+	ps.prep_n = -1
+	ps.v_a = ""
+	ps.n_a = -1
+	ps.accedMutex.Lock()
+	ps.phase = None
+	ps.numAcc = 0
+	ps.numRej = 0
+	ps.accedMutex.Unlock()
 
 	return nil
 }
@@ -397,8 +429,26 @@ func (ps *paxosStates) CreateCommitMsg() ([]byte, error) {
 // This function is used by an acceptor to react to a commit
 // message. It will react corresponding to the current state.
 func (ps *paxosStates) receiveCommit(msg p_message) {
-	//val := msg.val
-	// TODO store the string into database
+	val := msg.val
+	// store the string into database
+	//TODO Need to deal with duplicates
+	tx, err := ps.storage.Begin()
+	if err != nil {
+		ps.logger.Printf("receiveCommit: database error. %s\n", err)
+	} else {
+		stmt, err := tx.Prepare("insert into storage(tweet, count) values(?, ?)")
+		if err != nil {
+			ps.logger.Printf("receiveCommit: database error. %s\n", err)
+		}
+		defer stmt.Close()
+		if err != nil {
+			_, err := stmt.Exec(val, 1)
+			if err != nil {
+				ps.logger.Printf("receiveCommit: exec error. %s\n", err)
+			}
+		}
+		tx.Commit()
+	}
 }
 
 // unmarshalls and determines the type of a p_message
