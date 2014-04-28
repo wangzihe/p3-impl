@@ -131,7 +131,7 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	toReturn := false
 	acc := <-ps.prepChan
 	if acc {
-		ps.logger.Printf("Prepare: prepare-ok from majority")
+		ps.logger.Printf("Prepare: prepare-ok from majority\n")
 		toReturn = true
 	}
 
@@ -203,25 +203,27 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 	ps.accedMutex.Lock()
 	if ps.phase == Prepare {
-		if msg.acc {
-			ps.numAcc++
-			// udpate the uncommitted value and corresponding proposal ID
-			if msg.val != "" {
-				ps.accingMutex.Lock()
-				if msg.seqNum > ps.prep_n {
-					ps.prep_n = msg.seqNum
-					ps.prep_v = msg.val
+		if msg.seqNum == ps.mySeqNum { // ignore responses to old requests
+			if msg.acc {
+				ps.numAcc++
+				// udpate the uncommitted value and corresponding proposal ID
+				if msg.val != "" {
+					ps.accingMutex.Lock()
+					if msg.seqNum > ps.prep_n {
+						ps.prep_n = msg.seqNum
+						ps.prep_v = msg.val
+					}
+					ps.accingMutex.Unlock()
 				}
-				ps.accingMutex.Unlock()
+			} else {
+				ps.numRej++
 			}
-		} else {
-			ps.numRej++
-		}
 
-		if 2*ps.numAcc > ps.numNodes { // proposal accepted
-			ps.prepChan <- true
-		} else if 2*ps.numRej > ps.numNodes { // proposal rejected
-			ps.prepChan <- false
+			if 2*ps.numAcc > ps.numNodes { // proposal accepted
+				ps.prepChan <- true
+			} else if 2*ps.numRej > ps.numNodes { // proposal rejected
+				ps.prepChan <- false
+			}
 		}
 	}
 	ps.accedMutex.Unlock()
@@ -307,7 +309,7 @@ func (ps *paxosStates) CreateAcceptMsg(val string) ([]byte, error) {
 // This function is used by an acceptor to react to an accept request.
 // It will react corresponding to the current state.
 func (ps *paxosStates) receiveAccept(msg p_message) {
-	resp := &p_message{mtype: AcceptReply, HostPort: ps.myHostPort}
+	resp := &p_message{mtype: AcceptReply, HostPort: ps.myHostPort, seqNum: msg.seqNum}
 	ps.accedMutex.Lock()
 	if ps.phase == None {
 		// this server is acceptor
@@ -347,16 +349,18 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
 	ps.accedMutex.Lock()
 	if ps.phase == Accept {
-		if msg.acc {
-			ps.numAcc++
-		} else {
-			ps.numRej++
-		}
+		if msg.seqNum == ps.mySeqNum { // ignore old responses
+			if msg.acc {
+				ps.numAcc++
+			} else {
+				ps.numRej++
+			}
 
-		if 2*ps.numAcc > ps.numNodes { // majority accepts
-			ps.accChan <- true
-		} else if 2*ps.numRej > ps.numNodes { // majority rejects
-			ps.accChan <- false
+			if 2*ps.numAcc > ps.numNodes { // majority accepts
+				ps.accChan <- true
+			} else if 2*ps.numRej > ps.numNodes { // majority rejects
+				ps.accChan <- false
+			}
 		}
 	}
 
