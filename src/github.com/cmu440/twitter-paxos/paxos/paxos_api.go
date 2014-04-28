@@ -12,5 +12,12 @@ type PaxosStates interface {
 	// reply accept-ok. Otherwise, it will return false.
 	Accept(string) (bool, error)
 
+	// This function is used by a leader to commit a value.
+	// It will return an error if something fails. Otherwise,
+	// it will just return a nil error message.
+	//CommitVal() error
+
+	PaxosCommit(string) (string, error)
+
 	Interpret_message([]byte)
 }
