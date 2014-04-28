@@ -419,7 +419,14 @@ func (ss *storageServer) Ping(a, b *int) error {
 	return nil
 }
 
-func (ss *storageServer) Commit(a, b *int) error {
+func (ss *storageServer) Commit(args *storagerpc.ServerArgs,
+	reply *storagerpc.ServerReply) error {
 	fmt.Printf("commit called\n")
+	commitVal, err := ss.PaxosHandler.PaxosCommit(args.Val)
+	if err != nil {
+		return err
+	} else {
+		reply.Val = commitVal
+	}
 	return nil
 }

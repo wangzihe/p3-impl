@@ -4,7 +4,7 @@
 package storagerpc
 
 type RemoteStorageServer interface {
-	Commit(*int, *int) error
+	Commit(*ServerArgs, *ServerReply) error
 	Ping(*int, *int) error
 }
 
