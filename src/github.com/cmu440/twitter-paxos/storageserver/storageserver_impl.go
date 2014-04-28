@@ -90,14 +90,17 @@ func (ss *storageServer) parseConfigFile(config string,
 // The function will return the byte array for the message embeded
 // inside the high-level message, message type and error
 func (ss *storageServer) readMsg(conn net.Conn) ([]byte, int, error) {
+	ss.LOGV.Printf("readMsg: enter function\n")
 	reader := bufio.NewReader(conn)
 	msgBytes, err := reader.ReadBytes('\n')
+	ss.LOGV.Printf("readMsg: finished retrieving bytes from network\n")
 	if err != nil {
 		// error occurred while reading server message
 		fmt.Printf("readMsg: error while reading server message. %s\n", err)
 		return nil, -1, err
 	}
 	generalMsgB, msgType, err := ss.MsgHandler.RetrieveMsg(msgBytes)
+	ss.LOGV.Printf("readMsg: finished retriving general message\n")
 	if err != nil {
 		return nil, -1, err
 	} else {
@@ -251,15 +254,18 @@ func (ss *storageServer) pingServers() bool {
 
 // This is the handler to handle messages received by the server.
 func (ss *storageServer) networkHandler() {
+	ss.LOGV.Printf("networkHandler: start listening\n")
 	listener := ss.MsgListener
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
 			// listen socket is closed by the main thread
+			ss.LOGV.Printf("networkHandler: error while accpeting. %s\n", err)
 			return
 		} else {
 			// read server message
+			ss.LOGV.Printf("networkHandler: received a message\n")
 			msgB, msgType, errR := ss.readMsg(conn)
 
 			if errR != nil {
@@ -374,6 +380,7 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 	}
 	server.RPCListener = rpcLn
 	msgListenPort := ":" + portMsg
+	server.LOGV.Printf("msgListener is on %s\n", portMsg)
 	msgLn, err := net.Listen("tcp", msgListenPort)
 	if err != nil {
 		server.LOGV.Printf("NewStorageServer: error while creating message listen socket.\n", err)
@@ -424,9 +431,11 @@ func (ss *storageServer) Commit(args *storagerpc.ServerArgs,
 	fmt.Printf("commit called\n")
 	commitVal, err := ss.PaxosHandler.PaxosCommit(args.Val)
 	if err != nil {
+		fmt.Printf("commit error. %s\n", err)
 		return err
 	} else {
 		reply.Val = commitVal
+		fmt.Printf("commit success\n")
 	}
 	return nil
 }

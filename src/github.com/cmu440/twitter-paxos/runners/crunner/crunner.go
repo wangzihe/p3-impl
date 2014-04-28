@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net"
 	"net/rpc"
+
+	"github.com/cmu440/twitter-paxos/rpc/storagerpc"
 )
 
 func main() {
@@ -12,9 +14,10 @@ func main() {
 		fmt.Printf("error dialing rpc. %s\n", err)
 		return
 	}
-	var a int = 1
-	var b int = 2
-	err = cli.Call("StorageServer.Commit", &a, &b)
+
+	args := &storagerpc.ServerArgs{Val: "hello world"}
+	var reply storagerpc.ServerReply
+	err = cli.Call("StorageServer.Commit", args, &reply)
 	if err != nil {
 		fmt.Printf("error calling rpc. %s\n", err)
 	}

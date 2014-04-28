@@ -108,6 +108,7 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 // being successfully made. Otherwise, it will return false.
 func (ps *paxosStates) Prepare() (bool, error) {
 	// set phase
+	ps.logger.Printf("Prepare: about to set phase\n")
 	ps.accedMutex.Lock()
 	if ps.phase != None {
 		// server is busy handling the previous commit
@@ -116,21 +117,28 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	}
 	ps.phase = Prepare
 	ps.accedMutex.Unlock()
+	ps.logger.Printf("Prepare: finished setting phase.\n")
 
 	// create prepare message
+	ps.logger.Printf("Prepare: about to create prepare message\n")
 	msgB, err := ps.CreatePrepareMsg()
 	if err != nil {
 		ps.logger.Printf("Prepare: error while creating prepare message. %s\n", err)
 		return false, err
 	}
+	ps.logger.Printf("Prepare: finished creating prepare message\n")
 	// send prepare message to the network
+	ps.logger.Printf("Prepare: about to broadcast\n")
 	ps.broadCastMsg(msgB)
+	ps.logger.Printf("Prepare: finished broadcast\n")
 
 	// wait for the majority to respond. Note that paxos doesn't
 	// guarantee liveness. Therefore, we might wait forever due
 	// to message loss.
+	ps.logger.Printf("Prepare: wait for majority response\n")
 	toReturn := false
 	acc := <-ps.prepChan
+	ps.logger.Printf("Prepare: received majority response\n")
 	if acc {
 		ps.logger.Printf("Prepare: prepare-ok from majority")
 		toReturn = true
@@ -463,7 +471,9 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 //     Returning error must gurantee that the value won't be committed
 //     in the future without retrying.
 func (ps *paxosStates) PaxosCommit(val string) (string, error) {
+	ps.logger.Printf("enter PaxosCommit\n")
 	prepSuccess, err := ps.Prepare()
+	ps.logger.Printf("PaxosCommit: finished prepare phase\n")
 	if err != nil {
 		return "", err
 	}
@@ -542,6 +552,7 @@ func (ps *paxosStates) sendMsg(port string, msgB []byte) error {
 			}
 		}
 	}
+	ps.logger.Printf("sendMsg: finished sending message to %s\n", port)
 	return nil
 }
 
