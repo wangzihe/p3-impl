@@ -130,8 +130,11 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	// guarantee liveness. Therefore, we might wait forever due
 	// to message loss.
 	toReturn := false
-	acc := <-ps.prepChan
-	if acc {
+    acc := true
+    if ps.numNodes > 1 { // trivially accept if only one node
+	    acc := <-ps.prepChan
+    }
+    if acc {
 		ps.logger.Printf("Prepare: prepare-ok from majority\n")
 		toReturn = true
 	}
@@ -267,7 +270,10 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 	// guarantee liveness. Therefore, we might wait forever due
 	// to message loss.
 	toReturn := false
-	acc := <-ps.accChan
+    acc := true
+    if ps.numNodes > 1 {
+	    acc = <-ps.accChan
+    }
 	if acc {
 		// majority accepts
 		ps.logger.Printf("Accept: accept-ok from majority")
