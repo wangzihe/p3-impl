@@ -5,7 +5,7 @@ type MessageLib interface {
 	// This function creates a message by embedding either a server
 	// message or a paxos message into a higher level message type.
 	// The higher level message is ended with a newline character.
-	CreateMsg(int, []byte) ([]byte, error)
+	CreateMsg(int, string) ([]byte, error)
 
 	// This function retrieves a message from the higher level
 	// message type received throught network. It returns the byte

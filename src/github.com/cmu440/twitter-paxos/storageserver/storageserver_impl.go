@@ -278,10 +278,9 @@ func (ss *storageServer) networkHandler() {
 					conn.Close()
 				case message.PAXOS:
 					// received a paxos message
-					// TODO use go routine to handle paxos message
+					ss.LOGV.Printf("networkHandler: received a paxos message\n")
 					go ss.PaxosHandler.Interpret_message(msgB)
 					conn.Close()
-					ss.LOGV.Printf("received a ping response\n")
 				}
 			}
 		}
@@ -416,7 +415,7 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 		return nil, errors.New("not all servers exist")
 	}
 	server.PaxosHandler = paxos.NewPaxosStates(portMsg,
-		server.ServerMsgPorts, server.LOGV, db)
+		server.ServerMsgPorts, server.LOGV, databaseFile)
 
 	return server, nil
 }

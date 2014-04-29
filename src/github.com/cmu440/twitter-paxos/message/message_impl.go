@@ -15,7 +15,7 @@ const (
 // paxos message
 type Message struct {
 	Type int    // Type of message: either server msg or paxos msg
-	Msg  []byte // Marshalled message
+	Msg  string // Marshalled message
 }
 
 // Empty struct that is used as a message handler
@@ -27,7 +27,7 @@ func NewMessageHandler() MessageLib {
 }
 
 func (msgLib *messageHandler) CreateMsg(msgType int,
-	msg []byte) ([]byte, error) {
+	msg string) ([]byte, error) {
 	newMsg := &Message{Type: msgType, Msg: msg}
 	msgB, err := json.Marshal(*newMsg)
 	if err != nil {
@@ -48,6 +48,6 @@ func (msgLib *messageHandler) RetrieveMsg(rawMsg []byte) ([]byte,
 	if err != nil {
 		return nil, -1, err
 	} else {
-		return msg.Msg, msg.Type, nil
+		return []byte(msg.Msg), msg.Type, nil
 	}
 }

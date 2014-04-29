@@ -25,7 +25,7 @@ import (
 type Phase int
 
 const (
-	None Phase = iota + 1 // Indicates the server is an acceptor
+	None Phase = iota // Indicates the server is an acceptor
 	Prepare
 	Accept
 	PrepareReply
@@ -51,19 +51,19 @@ type paxosStates struct {
 	prep_n      int         // largest proposal ID received during prepare stage
 	mySeqNum    int         // seqNum of my proposal if proposing
 
-	prepChan   chan bool          // channel for reporting quorum during prepare phase
-	accChan    chan bool          // channel for reporting quorum during accept phase
-	logger     *log.Logger        // logger for paxos (same as the one for server)
-	msgHandler message.MessageLib // message handler
-	storage    *sql.DB            // database used by storage server
+	prepChan     chan bool          // channel for reporting quorum during prepare phase
+	accChan      chan bool          // channel for reporting quorum during accept phase
+	logger       *log.Logger        // logger for paxos (same as the one for server)
+	msgHandler   message.MessageLib // message handler
+	databaseFile string             // database used by storage server
 }
 
 type p_message struct {
-	mtype    Phase
+	Mtype    Phase
 	HostPort string // for sending response
-	seqNum   int    // proposal ID corresponding to val
-	acc      bool   // True if reply OK
-	val      string // value related to the proposal. emptry string is there is no value to send
+	SeqNum   int    // proposal ID corresponding to val
+	Acc      bool   // True if reply OK
+	Val      string // value related to the proposal. emptry string is there is no value to send
 }
 
 // This function creates a paxos package for storage server to use.
@@ -72,8 +72,8 @@ type p_message struct {
 // generate the node's ID number, which in turn ensures that sequence numbers
 // are unique to that node
 func NewPaxosStates(myHostPort string, nodes *list.List,
-	logger *log.Logger, storage *sql.DB) PaxosStates {
-	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), storage: storage}
+	logger *log.Logger, databaseFile string) PaxosStates {
+	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), databaseFile: databaseFile}
 	var i int = 0
 	for e := nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -157,13 +157,22 @@ func (ps *paxosStates) CreatePrepareMsg() ([]byte, error) {
 	ps.accingMutex.Lock()
 	ps.n_h = ps.numNodes*(1+(ps.n_h/ps.numNodes)) + ps.myID
 	ps.mySeqNum = ps.n_h
-	msg := &p_message{mtype: Prepare, HostPort: ps.myHostPort, seqNum: ps.n_h}
+	msg := &p_message{Mtype: Prepare, HostPort: ps.myHostPort, SeqNum: ps.n_h}
 	ps.accingMutex.Unlock()
-	msgB, err := json.Marshal(msg)
+	ps.logger.Printf("CreatePrepareMsg: mtype = %d\n", msg.Mtype)
+	ps.logger.Printf("CreatePrepareMsg: seqNum = %d\n", msg.SeqNum)
+	msgB, err := json.Marshal(*msg)
+	/* for debug */
+	var t p_message
+	json.Unmarshal(msgB, &t)
+	ps.logger.Printf("CreatePrepareMsg: unmarshalled mtype = %d\n", t.Mtype)
+	ps.logger.Printf("CreatePrepareMsg: unmarshalled seqNum = %d\n", t.SeqNum)
 	if err != nil {
+		ps.logger.Printf("CreatePrepareMsg: error while marshalling. %s\n", err)
 		return nil, err
 	}
-	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, msgB)
+	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
+	ps.logger.Printf("CreatePrepareMsg: msg string is %s\n", string(msgB))
 	if err != nil {
 		return nil, err
 	}
@@ -174,30 +183,30 @@ func (ps *paxosStates) CreatePrepareMsg() ([]byte, error) {
 // This function is used by an acceptor to react to a prepare
 // message. It will react corresponding to the current state.
 func (ps *paxosStates) receiveProposal(msg p_message) {
-	resp := &p_message{mtype: PrepareReply, HostPort: ps.myHostPort}
+	resp := &p_message{Mtype: PrepareReply, HostPort: ps.myHostPort}
 	ps.accedMutex.Lock()
 	if ps.phase == None {
 		// this server is acceptor
 		ps.accingMutex.Lock()
-		if msg.seqNum > ps.n_h { // accept
-			resp.acc = true
-			resp.val = ps.v_a
-			resp.seqNum = ps.n_a
-			ps.n_h = msg.seqNum
+		if msg.SeqNum > ps.n_h { // accept
+			resp.Acc = true
+			resp.Val = ps.v_a
+			resp.SeqNum = ps.n_a
+			ps.n_h = msg.SeqNum
 		} else { // reject
-			resp.acc = false
+			resp.Acc = false
 		}
 		ps.accingMutex.Unlock()
 	} else {
 		// this server is leader. Prevent two leaders in one system
 		// leader must reject a prepare request of another node
-		resp.acc = false
+		resp.Acc = false
 	}
 	ps.accedMutex.Unlock()
 
 	// send out response message
 	msgB, err := json.Marshal(resp)
-	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, msgB)
+	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
 		ps.logger.Printf("receiveProposal: error creating message. %s\n", err)
 	} else {
@@ -212,29 +221,30 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 // response from an acceptor. It will react corresponding to
 // the message and make updates to the current state.
 func (ps *paxosStates) receivePrepareResponse(msg p_message) {
+	ps.logger.Printf("receivePrepareResponse: enter function\n")
 	ps.accedMutex.Lock()
+	ps.logger.Printf("receivePrepareResponse: get lock\n")
 	if ps.phase == Prepare {
-		if msg.seqNum == ps.mySeqNum { // ignore responses to old requests
-			if msg.acc {
-				ps.numAcc++
-				// udpate the uncommitted value and corresponding proposal ID
-				if msg.val != "" {
-					ps.accingMutex.Lock()
-					if msg.seqNum > ps.prep_n {
-						ps.prep_n = msg.seqNum
-						ps.prep_v = msg.val
-					}
-					ps.accingMutex.Unlock()
+		if msg.Acc {
+			ps.numAcc++
+			// udpate the uncommitted value and corresponding proposal ID
+			if msg.Val != "" {
+				ps.accingMutex.Lock()
+				if msg.SeqNum > ps.prep_n {
+					ps.prep_n = msg.SeqNum
+					ps.prep_v = msg.Val
 				}
-			} else {
-				ps.numRej++
+				ps.accingMutex.Unlock()
 			}
+		} else {
+			ps.numRej++
+		}
 
-			if 2*ps.numAcc > ps.numNodes { // proposal accepted
-				ps.prepChan <- true
-			} else if 2*ps.numRej > ps.numNodes { // proposal rejected
-				ps.prepChan <- false
-			}
+		ps.logger.Printf("receivedPrepareResponse: numAcc is %d\n", ps.numAcc)
+		if 2*ps.numAcc > ps.numNodes { // proposal accepted
+			ps.prepChan <- true
+		} else if 2*ps.numRej > ps.numNodes { // proposal rejected
+			ps.prepChan <- false
 		}
 	}
 	ps.accedMutex.Unlock()
@@ -307,12 +317,12 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 // and my proposal seqNum.
 func (ps *paxosStates) CreateAcceptMsg(val string) ([]byte, error) {
 	// No need to grab lock since no other thread will update ps.mySeqNum
-	msg := &p_message{mtype: Accept, HostPort: ps.myHostPort, seqNum: ps.mySeqNum, val: val}
+	msg := &p_message{Mtype: Accept, HostPort: ps.myHostPort, SeqNum: ps.mySeqNum, Val: val}
 	msgB, err := json.Marshal(msg)
 	if err != nil {
 		return nil, err
 	}
-	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, msgB)
+	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
 		return nil, err
 	}
@@ -323,36 +333,36 @@ func (ps *paxosStates) CreateAcceptMsg(val string) ([]byte, error) {
 // This function is used by an acceptor to react to an accept request.
 // It will react corresponding to the current state.
 func (ps *paxosStates) receiveAccept(msg p_message) {
-	resp := &p_message{mtype: AcceptReply, HostPort: ps.myHostPort, seqNum: msg.seqNum}
+	resp := &p_message{Mtype: AcceptReply, HostPort: ps.myHostPort, SeqNum: msg.SeqNum}
 	ps.accedMutex.Lock()
 	if ps.phase == None {
 		// this server is acceptor
 		ps.accingMutex.Lock()
-		if msg.seqNum >= ps.n_h { // accept
-			resp.acc = true
+		if msg.SeqNum >= ps.n_h { // accept
+			resp.Acc = true
 			// update v_a and n_a
-			ps.v_a = msg.val
-			ps.n_a = msg.seqNum
+			ps.v_a = msg.Val
+			ps.n_a = msg.SeqNum
 		} else { // reject
-			resp.acc = false
+			resp.Acc = false
 		}
 		ps.accingMutex.Unlock()
 	} else {
 		// this server is leader. Prevent two leaders in one system
 		// leader must reject an accept request of another node
-		resp.acc = false
+		resp.Acc = false
 	}
 	ps.accedMutex.Unlock()
 
 	// send out response message
 	msgB, err := json.Marshal(resp)
-	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, msgB)
+	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
-		ps.logger.Printf("receiveProposal: error creating message. %s\n", err)
+		ps.logger.Printf("receiveAccept: error creating message. %s\n", err)
 	} else {
 		err = ps.sendMsg(msg.HostPort, generalMsg)
 		if err != nil {
-			ps.logger.Printf("receiveProposal: error sending message. %s\n", err)
+			ps.logger.Printf("receiveAccept: error sending message. %s\n", err)
 		}
 	}
 }
@@ -363,8 +373,8 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
 	ps.accedMutex.Lock()
 	if ps.phase == Accept {
-		if msg.seqNum == ps.mySeqNum { // ignore old responses
-			if msg.acc {
+		if msg.SeqNum == ps.mySeqNum { // ignore old responses
+			if msg.Acc {
 				ps.numAcc++
 			} else {
 				ps.numRej++
@@ -396,22 +406,17 @@ func (ps *paxosStates) commitVal() (string, error) {
 	// commit on its local machine. since this is the only thead
 	// reading v_a, therefore no need to grab the lock.
 	val := ps.v_a
-	tx, err := ps.storage.Begin()
+	db, err := sql.Open("sqlite3", ps.databaseFile)
 	if err != nil {
-		ps.logger.Printf("receiveCommit: database error. %s\n", err)
-	} else {
-		stmt, err := tx.Prepare("insert into storage(tweet, count) values(?, ?)")
-		if err != nil {
-			ps.logger.Printf("receiveCommit: database error. %s\n", err)
-		}
-		defer stmt.Close()
-		if err != nil {
-			_, err := stmt.Exec(val, 1)
-			if err != nil {
-				ps.logger.Printf("receiveCommit: exec error. %s\n", err)
-			}
-		}
-		tx.Commit()
+		log.Fatal(err)
+	}
+	defer db.Close()
+	query := "insert into storage(tweet, count) values ('" + val + "'"
+	query += ", 1)"
+	_, err = db.Exec(query)
+	if err != nil {
+		// TODO should we return error here?
+		ps.logger.Printf("receiveCommit: error while executing query. %s\n", err)
 	}
 
 	// reset phase variable to None
@@ -432,12 +437,12 @@ func (ps *paxosStates) commitVal() (string, error) {
 func (ps *paxosStates) CreateCommitMsg() ([]byte, error) {
 	// no need to grab lock since we are the only thread reading mySeqNum
 	// and v_a
-	msg := &p_message{mtype: Commit, HostPort: ps.myHostPort, seqNum: ps.mySeqNum, val: ps.v_a}
+	msg := &p_message{Mtype: Commit, HostPort: ps.myHostPort, SeqNum: ps.mySeqNum, Val: ps.v_a}
 	msgB, err := json.Marshal(msg)
 	if err != nil {
 		return nil, err
 	}
-	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, msgB)
+	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
 		return nil, err
 	}
@@ -448,25 +453,20 @@ func (ps *paxosStates) CreateCommitMsg() ([]byte, error) {
 // This function is used by an acceptor to react to a commit
 // message. It will react corresponding to the current state.
 func (ps *paxosStates) receiveCommit(msg p_message) {
-	val := msg.val
+	val := msg.Val
+	ps.logger.Printf("receiveCommit: value to be commited is %s\n", val)
 	// store the string into database
 	//TODO Need to deal with duplicates
-	tx, err := ps.storage.Begin()
+	db, err := sql.Open("sqlite3", ps.databaseFile)
 	if err != nil {
-		ps.logger.Printf("receiveCommit: database error. %s\n", err)
-	} else {
-		stmt, err := tx.Prepare("insert into storage(tweet, count) values(?, ?)")
-		if err != nil {
-			ps.logger.Printf("receiveCommit: database error. %s\n", err)
-		}
-		defer stmt.Close()
-		if err != nil {
-			_, err := stmt.Exec(val, 1)
-			if err != nil {
-				ps.logger.Printf("receiveCommit: exec error. %s\n", err)
-			}
-		}
-		tx.Commit()
+		log.Fatal(err)
+	}
+	defer db.Close()
+	query := "insert into storage(tweet, count) values ('" + val + "'"
+	query += ", 1)"
+	_, err = db.Exec(query)
+	if err != nil {
+		ps.logger.Printf("receiveCommit: error while executing query. %s\n", err)
 	}
 }
 
@@ -518,10 +518,14 @@ func (ps *paxosStates) PaxosCommit(val string) (string, error) {
 // unmarshalls and determines the type of a p_message
 // and calls the appropriate handler function
 func (ps *paxosStates) Interpret_message(marshalled []byte) {
+	ps.logger.Printf("Interpret_message: enter function\n")
 	var msg p_message
-	json.Unmarshal(marshalled, &msg)
+	err := json.Unmarshal(marshalled, &msg)
+	if err != nil {
+		ps.logger.Printf("Interpret_message: unmarshal error. %s\n", err)
+	}
 
-	switch msg.mtype {
+	switch msg.Mtype {
 	case None:
 		ps.logger.Printf("Interpret_message: wrong message type\n")
 	case Prepare:
@@ -529,7 +533,7 @@ func (ps *paxosStates) Interpret_message(marshalled []byte) {
 		ps.receiveProposal(msg)
 	case Accept:
 		ps.logger.Printf("Interpret_message: received Accept message\n")
-		//ps.receiveAcceptReq(msg)
+		ps.receiveAccept(msg)
 	case PrepareReply:
 		ps.logger.Printf("Interpret_message: received Prepare reply\n")
 		ps.receivePrepareResponse(msg)
@@ -539,6 +543,8 @@ func (ps *paxosStates) Interpret_message(marshalled []byte) {
 	case Commit:
 		ps.logger.Printf("Interpret_message: received Commit\n")
 		ps.receiveCommit(msg)
+	default:
+		ps.logger.Printf("fuck\n")
 	}
 }
 
