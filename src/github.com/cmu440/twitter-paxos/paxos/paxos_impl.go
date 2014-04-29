@@ -16,9 +16,9 @@ import (
 	"database/sql"
 	"errors"
 	_ "github.com/mattn/go-sqlite3"
-    "math/rand"
+	"math/rand"
 	"sync"
-    "time"
+	"time"
 
 	"github.com/cmu440/twitter-paxos/message"
 )
@@ -33,14 +33,15 @@ const (
 	PrepareReply
 	AcceptReply
 	Commit
+	NOOP
 )
 
 type TestSpec struct {
 	// if rand.Float32() > rate { drop operation }
-	PingRate, prepSendRate, prepRespondRate, accSendRate, accRespondRate, commRate float32
+	PingRate, PrepSendRate, PrepRespondRate, AccSendRate, AccRespondRate, CommRate float32
 	// <-time.After(time.Duration(del) * time.Millisecond) before operation
 	// maybe add functionality for if del == -1 { wait random time }
-	PingDel, prepSendDel, prepRespondDel, accSendDel, accRespondDel, commDel time.Duration
+	PingDel, PrepSendDel, PrepRespondDel, AccSendDel, AccRespondDel, CommDel time.Duration
 }
 
 type paxosStates struct {
@@ -49,14 +50,13 @@ type paxosStates struct {
 	myHostPort     string
 	myID, numNodes int
 
-	accedMutex     *sync.Mutex // protects the following variables
-	numAcc, numRej int         // number of ok/reject response received
-	phase          Phase       // which stage of paxos the server is at
-
-	// TODO: use these and figure out locking
-	iteration    int            // what this paxos thinks the iteration number is
-	commitedVals map[int]string // commited values for each iteration
-	accedVals    map[int]string // last acced value for each iteration
+	accedMutex     *sync.Mutex    // protects the following variables
+	numAcc, numRej int            // number of ok/reject response received
+	phase          Phase          // which stage of paxos the server is at
+	iteration      int            // what this paxos thinks the iteration number is
+	commitedVals   map[int]string // commited values for each iteration
+	behind         bool           // True means the node's iteration is behind
+	//accedVals      map[int]string // last acced value for each iteration TODO why do we need this?
 
 	accingMutex *sync.Mutex // protects the following variables
 	n_h         int         // highest seqNum seen so far; 0 if none has seen
@@ -76,11 +76,12 @@ type paxosStates struct {
 }
 
 type p_message struct {
-	Mtype    Phase
-	HostPort string // for sending response
-	SeqNum   int    // proposal ID corresponding to val
-	Acc      bool   // True if reply OK
-	Val      string // value related to the proposal. emptry string is there is no value to send
+	Mtype     Phase
+	HostPort  string // for sending response
+	SeqNum    int    // proposal ID corresponding to val
+	Iteration int    // iteration number
+	Acc       bool   // True if reply OK
+	Val       string // value related to the proposal. emptry string is there is no value to send
 }
 
 // This function creates a paxos package for storage server to use.
@@ -90,7 +91,12 @@ type p_message struct {
 // are unique to that node
 func NewPaxosStates(myHostPort string, nodes *list.List,
 	logger *log.Logger, databaseFile string, t TestSpec) PaxosStates {
-	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), databaseFile: databaseFile, test: t}
+	ps := &paxosStates{
+		nodes:        nodes,
+		myHostPort:   myHostPort,
+		numNodes:     nodes.Len(),
+		databaseFile: databaseFile,
+		test:         t}
 	var i int = 0
 	for e := nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -107,6 +113,9 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 	ps.numAcc = 0
 	ps.numRej = 0
 	ps.phase = None
+	ps.iteration = 0
+	ps.behind = false
+	ps.commitedVals = make(map[int]string)
 	ps.n_h = 0
 	ps.n_a = -1
 	ps.v_a = ""
@@ -124,8 +133,9 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 // to other nodes. It will return true when a proposal is
 // being successfully made. Otherwise, it will return false.
 func (ps *paxosStates) Prepare() (bool, error) {
-	// set phase
+	// set phase and extract iteration number
 	ps.logger.Printf("Prepare: about to set phase\n")
+	var iter int
 	ps.accedMutex.Lock()
 	if ps.phase != None {
 		// server is busy handling the previous commit
@@ -133,18 +143,19 @@ func (ps *paxosStates) Prepare() (bool, error) {
 		return false, nil
 	}
 	ps.phase = Prepare
+	iter = ps.iteration
 	ps.accedMutex.Unlock()
 	ps.logger.Printf("Prepare: finished setting phase.\n")
 
 	// create prepare message
 	ps.logger.Printf("Prepare: about to create prepare message\n")
-	msgB, err := ps.CreatePrepareMsg()
+	msgB, err := ps.CreatePrepareMsg(iter)
 	if err != nil {
 		ps.logger.Printf("Prepare: error while creating prepare message. %s\n", err)
 		return false, err
 	}
 	ps.logger.Printf("Prepare: finished creating prepare message\n")
-	<-time.After(ps.test.prepSendDel)
+	<-time.After(ps.test.PrepSendDel)
 	// send prepare message to the network
 	ps.logger.Printf("Prepare: about to broadcast\n")
 	ps.broadCastMsg(msgB, "prep")
@@ -169,16 +180,19 @@ func (ps *paxosStates) Prepare() (bool, error) {
 
 // This function returns a marshalled Prepare p_message with
 // (hopefully) a highest new seqNum
-func (ps *paxosStates) CreatePrepareMsg() ([]byte, error) {
+// iter Current iteration the node is on
+func (ps *paxosStates) CreatePrepareMsg(iter int) ([]byte, error) {
 	// generate a sequence number, ensured to be unique by
 	// taking next multiple of numNodes and adding myID
 	ps.accingMutex.Lock()
 	ps.n_h = ps.numNodes*(1+(ps.n_h/ps.numNodes)) + ps.myID
 	ps.mySeqNum = ps.n_h
-	msg := &p_message{Mtype: Prepare, HostPort: ps.myHostPort, SeqNum: ps.n_h}
+	msg := &p_message{
+		Mtype:     Prepare,
+		HostPort:  ps.myHostPort,
+		SeqNum:    ps.n_h,
+		Iteration: iter}
 	ps.accingMutex.Unlock()
-	ps.logger.Printf("CreatePrepareMsg: mtype = %d\n", msg.Mtype)
-	ps.logger.Printf("CreatePrepareMsg: seqNum = %d\n", msg.SeqNum)
 	msgB, err := json.Marshal(*msg)
 	if err != nil {
 		ps.logger.Printf("CreatePrepareMsg: error while marshalling. %s\n", err)
@@ -199,29 +213,52 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 	ps.accedMutex.Lock()
 	if ps.phase == None {
 		// this server is acceptor
-		ps.accingMutex.Lock()
-		if msg.SeqNum > ps.n_h { // accept
-			resp.Acc = true
-			resp.Val = ps.v_a
-			resp.SeqNum = ps.n_a
-			ps.n_h = msg.SeqNum
-		} else { // reject
+		if ps.iteration == msg.Iteration {
+			// acceptor is on the same iteration as the proposing node
+			// start normal paxos algorithm
+			ps.accingMutex.Lock()
+			if msg.SeqNum > ps.n_h { // accept
+				resp.Acc = true
+				resp.Val = ps.v_a
+				resp.SeqNum = ps.n_a
+				resp.Iteration = msg.Iteration
+				ps.n_h = msg.SeqNum
+			} else { // reject
+				resp.Acc = false
+				resp.Iteration = -1
+			}
+			ps.accingMutex.Unlock()
+		} else if ps.iteration < msg.Iteration {
+			// acceptor is behind the proposing node. reject proposal
 			resp.Acc = false
+			resp.Iteration = ps.iteration
+			// TODO trigger no-op recovery process
+		} else {
+			// acceptor is beyond the proposing node
+			// reject proposal
+			resp.Acc = false
+			// retrieve committed value for that iteration and
+			// send to proposing node
+			resp.Val = ps.commitedVals[msg.Iteration]
+			resp.SeqNum = -1
+			resp.Iteration = msg.Iteration
 		}
-		ps.accingMutex.Unlock()
 	} else {
 		// this server is leader. Prevent two leaders in one system
 		// leader must reject a prepare request of another node
 		resp.Acc = false
+		resp.Iteration = -1
 	}
 	ps.accedMutex.Unlock()
 
-	// send out response message
-	if rand.Float32() > ps.test.prepRespondRate {
+	// simulate network message loss and delay
+	if rand.Float32() > ps.test.PrepRespondRate {
 		ps.logger.Printf("receiveProposal: dropped prepare response message.\n")
 		return
 	}
-	<-time.After(ps.test.prepRespondDel)
+	<-time.After(ps.test.PrepRespondDel)
+
+	// send out response message
 	msgB, err := json.Marshal(resp)
 	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
@@ -254,6 +291,19 @@ func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 			}
 		} else {
 			ps.numRej++
+			// figure out reason for rejecting
+			if msg.Iteration != -1 {
+				// rejected due to unmatching iteration number
+				if msg.Iteration == ps.iteration {
+					// we are behind.
+					// TODO should we start no-op recovery after
+					//      a majority says we are behind?
+					ps.behind = true
+					// TODO do we need to commit the value returned by
+					//      the node?
+					ps.commitedVals[ps.iteration] = msg.Val
+				}
+			}
 		}
 
 		ps.logger.Printf("receivedPrepareResponse: numAcc is %d\n", ps.numAcc)
@@ -296,7 +346,7 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 		return false, err
 	}
 
-	<-time.After(ps.test.accSendDel)
+	<-time.After(ps.test.AccSendDel)
 	// send accept message to the network
 	ps.broadCastMsg(msgB, "acc")
 
@@ -372,11 +422,11 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 	ps.accedMutex.Unlock()
 
 	// send out response message
-	if rand.Float32() > ps.test.accRespondRate {
+	if rand.Float32() > ps.test.AccRespondRate {
 		ps.logger.Printf("receiveProposal: dropped accept response message.\n")
 		return
 	}
-	<-time.After(ps.test.accRespondDel)
+	<-time.After(ps.test.AccRespondDel)
 	msgB, err := json.Marshal(resp)
 	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
@@ -423,7 +473,7 @@ func (ps *paxosStates) commitVal() (string, error) {
 	}
 
 	// send prepare message to the network
-	time.After(ps.test.commDel)
+	time.After(ps.test.CommDel)
 	ps.broadCastMsg(msgB, "comm")
 
 	// commit on its local machine. since this is the only thead
@@ -534,6 +584,8 @@ func (ps *paxosStates) PaxosCommit(val string) (string, error) {
 		// TODO for now, we will just return error since this value
 		//      will never be commited as the server isn't elected
 		//      as a leader.
+
+		// TODO check whether the node is behind. If so, run no-op recovery
 		return "", errors.New("not commit")
 	}
 }
@@ -605,15 +657,15 @@ func (ps *paxosStates) broadCastMsg(msgB []byte, mType string) {
 		}
 
 		// drop messages for testing
-		if mType == "prep" && rand.Float32() > ps.test.prepSendRate {
+		if mType == "prep" && rand.Float32() > ps.test.PrepSendRate {
 			ps.logger.Printf("dropped prepare message. %s\n")
 			continue
 		}
-		if mType == "acc" && rand.Float32() > ps.test.accSendRate {
+		if mType == "acc" && rand.Float32() > ps.test.AccSendRate {
 			ps.logger.Printf("dropped accept message. %s\n")
 			continue
 		}
-		if mType == "comm" && rand.Float32() > ps.test.commRate {
+		if mType == "comm" && rand.Float32() > ps.test.CommRate {
 			ps.logger.Printf("dropped commit message. %s\n")
 			continue
 		}

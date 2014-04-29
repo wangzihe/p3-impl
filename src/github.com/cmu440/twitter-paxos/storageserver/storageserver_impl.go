@@ -10,12 +10,12 @@ import (
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"time"
-    "math/rand"
 
 	"github.com/cmu440/twitter-paxos/message"
 	"github.com/cmu440/twitter-paxos/paxos"
@@ -349,7 +349,8 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string, test paxos.
 	server.ServerRPCPorts = list.New()
 	server.ServerMsgPorts = list.New()
 	server.MsgHandler = message.NewMessageHandler()
-    server.test = test
+	server.test = test
+	server.PaxosHandler = nil
 
 	// create database file
 	databaseFile := "./storage" + portMsg + ".db"
@@ -414,14 +415,14 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string, test paxos.
 
 		fmt.Printf("finished ping\n")
 	*/
+	server.PaxosHandler = paxos.NewPaxosStates(portMsg,
+		server.ServerMsgPorts, server.LOGV, databaseFile, test)
 	if server.pingServers() == false {
 		server.LOGV.Printf("some servers failed to start\n")
 		server.RPCListener.Close()
 		server.MsgListener.Close()
 		return nil, errors.New("not all servers exist")
 	}
-	server.PaxosHandler = paxos.NewPaxosStates(portMsg,
-		server.ServerMsgPorts, server.LOGV, databaseFile, test)
 
 	return server, nil
 }
@@ -435,6 +436,9 @@ func (ss *storageServer) Ping(a, b *int) error {
 func (ss *storageServer) Commit(args *storagerpc.ServerArgs,
 	reply *storagerpc.ServerReply) error {
 	fmt.Printf("commit called\n")
+	if ss.PaxosHandler == nil {
+		return errors.New("server not ready")
+	}
 	commitVal, err := ss.PaxosHandler.PaxosCommit(args.Val)
 	if err != nil {
 		fmt.Printf("commit error. %s\n", err)

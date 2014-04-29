@@ -4,10 +4,12 @@ import (
 	//"database/sql"
 	"flag"
 	"fmt"
+	"github.com/cmu440/twitter-paxos/paxos"
 	"github.com/cmu440/twitter-paxos/storageserver"
 	//_ "github.com/mattn/go-sqlite3"
 	//"log"
 	"strconv"
+	"time"
 )
 
 var (
@@ -37,8 +39,21 @@ func main() {
 			return
 		}
 	*/
+	testspec := paxos.TestSpec{
+		PingRate:        1.0,
+		PrepSendRate:    1.0,
+		PrepRespondRate: 1.0,
+		AccSendRate:     1.0,
+		AccRespondRate:  1.0,
+		CommRate:        1.0,
+		PingDel:         time.Duration(0),
+		PrepSendDel:     time.Duration(0),
+		PrepRespondDel:  time.Duration(0),
+		AccSendDel:      time.Duration(0),
+		AccRespondDel:   time.Duration(0),
+		CommDel:         time.Duration(0)}
 	_, err := storageserver.NewStorageServer(strconv.Itoa(*rpcPort), strconv.Itoa(*msgPort),
-		configRPCPath, configMsgPath)
+		configRPCPath, configMsgPath, testspec)
 	if err != nil {
 		fmt.Printf("error while creating new storage server\n")
 		return
