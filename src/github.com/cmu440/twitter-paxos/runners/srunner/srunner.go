@@ -40,12 +40,12 @@ func main() {
 		}
 	*/
 	testspec := paxos.TestSpec{
-		PingRate:        1.0,
-		PrepSendRate:    1.0,
-		PrepRespondRate: 1.0,
-		AccSendRate:     1.0,
-		AccRespondRate:  1.0,
-		CommRate:        1.0,
+		PingRate:        0.0,
+		PrepSendRate:    0.0,
+		PrepRespondRate: 0.0,
+		AccSendRate:     0.0,
+		AccRespondRate:  0.0,
+		CommRate:        0.0,
 		PingDel:         time.Duration(0),
 		PrepSendDel:     time.Duration(0),
 		PrepRespondDel:  time.Duration(0),
