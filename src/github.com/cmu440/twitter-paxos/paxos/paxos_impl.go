@@ -16,7 +16,9 @@ import (
 	"database/sql"
 	"errors"
 	_ "github.com/mattn/go-sqlite3"
+    "math/rand"
 	"sync"
+    "time"
 
 	"github.com/cmu440/twitter-paxos/message"
 )
@@ -33,6 +35,14 @@ const (
 	Commit
 )
 
+type TestSpec struct {
+	// if rand.Float32() > rate { drop operation }
+	PingRate, prepSendRate, prepRespondRate, accSendRate, accRespondRate, commRate float32
+	// <-time.After(time.Duration(del) * time.Millisecond) before operation
+	// maybe add functionality for if del == -1 { wait random time }
+	PingDel, prepSendDel, prepRespondDel, accSendDel, accRespondDel, commDel time.Duration
+}
+
 type paxosStates struct {
 	// the following are constant once NewPaxos is called
 	nodes          *list.List // list of all HostPorts
@@ -42,6 +52,11 @@ type paxosStates struct {
 	accedMutex     *sync.Mutex // protects the following variables
 	numAcc, numRej int         // number of ok/reject response received
 	phase          Phase       // which stage of paxos the server is at
+
+	// TODO: use these and figure out locking
+	iteration    int            // what this paxos thinks the iteration number is
+	commitedVals map[int]string // commited values for each iteration
+	accedVals    map[int]string // last acced value for each iteration
 
 	accingMutex *sync.Mutex // protects the following variables
 	n_h         int         // highest seqNum seen so far; 0 if none has seen
@@ -56,6 +71,8 @@ type paxosStates struct {
 	logger       *log.Logger        // logger for paxos (same as the one for server)
 	msgHandler   message.MessageLib // message handler
 	databaseFile string             // database used by storage server
+
+	test TestSpec // parameters for testing
 }
 
 type p_message struct {
@@ -72,8 +89,8 @@ type p_message struct {
 // generate the node's ID number, which in turn ensures that sequence numbers
 // are unique to that node
 func NewPaxosStates(myHostPort string, nodes *list.List,
-	logger *log.Logger, databaseFile string) PaxosStates {
-	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), databaseFile: databaseFile}
+	logger *log.Logger, databaseFile string, t TestSpec) PaxosStates {
+	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), databaseFile: databaseFile, test: t}
 	var i int = 0
 	for e := nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -127,9 +144,10 @@ func (ps *paxosStates) Prepare() (bool, error) {
 		return false, err
 	}
 	ps.logger.Printf("Prepare: finished creating prepare message\n")
+	<-time.After(ps.test.prepSendDel)
 	// send prepare message to the network
 	ps.logger.Printf("Prepare: about to broadcast\n")
-	ps.broadCastMsg(msgB)
+	ps.broadCastMsg(msgB, "prep")
 	ps.logger.Printf("Prepare: finished broadcast\n")
 
 	// wait for the majority to respond. Note that paxos doesn't
@@ -205,6 +223,11 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 	ps.accedMutex.Unlock()
 
 	// send out response message
+	if rand.Float32() > ps.test.prepRespondRate {
+		ps.logger.Printf("receiveProposal: dropped prepare response message.\n")
+		return
+	}
+	<-time.After(ps.test.prepRespondDel)
 	msgB, err := json.Marshal(resp)
 	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
@@ -280,8 +303,9 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 		return false, err
 	}
 
+	<-time.After(ps.test.accSendDel)
 	// send accept message to the network
-	ps.broadCastMsg(msgB)
+	ps.broadCastMsg(msgB, "acc")
 
 	// wait for the majority to respond. Note that paxos doesn't
 	// guarantee liveness. Therefore, we might wait forever due
@@ -355,6 +379,11 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 	ps.accedMutex.Unlock()
 
 	// send out response message
+	if rand.Float32() > ps.test.accRespondRate {
+		ps.logger.Printf("receiveProposal: dropped accept response message.\n")
+		return
+	}
+	<-time.After(ps.test.accRespondDel)
 	msgB, err := json.Marshal(resp)
 	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
 	if err != nil {
@@ -401,7 +430,8 @@ func (ps *paxosStates) commitVal() (string, error) {
 	}
 
 	// send prepare message to the network
-	ps.broadCastMsg(msgB)
+	time.After(ps.test.commDel)
+	ps.broadCastMsg(msgB, "comm")
 
 	// commit on its local machine. since this is the only thead
 	// reading v_a, therefore no need to grab the lock.
@@ -572,13 +602,29 @@ func (ps *paxosStates) sendMsg(port string, msgB []byte) error {
 }
 
 // This function sends message to every other node in the network.
-func (ps *paxosStates) broadCastMsg(msgB []byte) {
+// mType is just for determining the drop rate for testing
+func (ps *paxosStates) broadCastMsg(msgB []byte, mType string) {
 	for e := ps.nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
 		if port == ps.myHostPort {
 			// skip sending message to itself
 			continue
 		}
+
+		// drop messages for testing
+		if mType == "prep" && rand.Float32() > ps.test.prepSendRate {
+			ps.logger.Printf("dropped prepare message. %s\n")
+			continue
+		}
+		if mType == "acc" && rand.Float32() > ps.test.accSendRate {
+			ps.logger.Printf("dropped accept message. %s\n")
+			continue
+		}
+		if mType == "comm" && rand.Float32() > ps.test.commRate {
+			ps.logger.Printf("dropped commit message. %s\n")
+			continue
+		}
+
 		// send marshalled to ith node
 		err := ps.sendMsg(port, msgB)
 		if err != nil {
