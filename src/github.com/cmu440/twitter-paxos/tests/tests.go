@@ -17,29 +17,30 @@ import (
 func basic3Nodes() bool {
 
 	// default test parameters are 0 drop rate, 0 delay, no ignores
-	t := &paxos.TestSpec{}
+	t1 := &paxos.TestSpec{Testing: true}
+	t := &paxos.TestSpec{DontRegister: true, Testing: true}
 
 	serverReadyChan := make(chan bool)
 
 	// SET UP SERVERS
 	go func() {
-		_, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC1.txt", "./configMsg1.txt", *t)
+		_, err := storageserver.NewStorageServer("9090", "9095", "./configRPC1.txt", "./configMsg1.txt", *t1)
 		if err != nil {
-			fmt.Println("failed to start server s1")
+			fmt.Printf("failed to start server s1 with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
 	go func() {
-		_, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC1.txt", "./configMsg1.txt", *t)
+		_, err := storageserver.NewStorageServer("9091", "9096", "./configRPC1.txt", "./configMsg1.txt", *t)
 		if err != nil {
-			fmt.Println("failed to start server s2")
+			fmt.Printf("failed to start server s2 with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
 	go func() {
-		_, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC1.txt", "./configMsg1.txt", *t)
+		_, err := storageserver.NewStorageServer("9092", "9097", "./configRPC1.txt", "./configMsg1.txt", *t)
 		if err != nil {
-			fmt.Println("failed to start server s3")
+			fmt.Printf("failed to start server s3 with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
@@ -97,42 +98,42 @@ func basic3Nodes() bool {
 // 6. node D should commit "vA"
 func disconnectTwoNodes() bool {
 
-	DIgnore := []string{"localhost:9095"}
-	AIgnore := []string{"localhost:9098"}
+	DIgnore := []string{"9095"}
+	AIgnore := []string{"9098"}
 
-	tA := &paxos.TestSpec{Ignore: AIgnore}
+	tA := &paxos.TestSpec{Ignore: AIgnore, Testing: true}
 	// default test parameters are 0 drop rate, 0 delay, no ignores
-	tBC := &paxos.TestSpec{}
-	tD := &paxos.TestSpec{Ignore: DIgnore}
+	tBC := &paxos.TestSpec{DontRegister: true, Testing: true}
+	tD := &paxos.TestSpec{DontRegister: true, Ignore: DIgnore, Testing: true}
 
 	serverReadyChan := make(chan bool)
 
 	// SET UP SERVERS
 	go func() {
-		_, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC1.txt", "./configMsg1.txt", *tA)
+		_, err := storageserver.NewStorageServer("9090", "9095", "./configRPC2.txt", "./configMsg2.txt", *tA)
 		if err != nil {
-			fmt.Println("failed to start server A")
+			fmt.Printf("failed to start server A with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
 	go func() {
-		_, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC1.txt", "./configMsg1.txt", *tBC)
+		_, err := storageserver.NewStorageServer("9091", "9096", "./configRPC2.txt", "./configMsg2.txt", *tBC)
 		if err != nil {
-			fmt.Println("failed to start server B")
+			fmt.Printf("failed to start server B with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
 	go func() {
-		_, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC1.txt", "./configMsg1.txt", *tBC)
+		_, err := storageserver.NewStorageServer("9092", "9097", "./configRPC2.txt", "./configMsg2.txt", *tBC)
 		if err != nil {
-			fmt.Println("failed to start server C")
+			fmt.Printf("failed to start server C with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
 	go func() {
-		_, err := storageserver.NewStorageServer(":9093", ":9098", "./configRPC1.txt", "./configMsg1.txt", *tD)
+		_, err := storageserver.NewStorageServer("9093", "9098", "./configRPC2.txt", "./configMsg2.txt", *tD)
 		if err != nil {
-			fmt.Println("failed to start server D")
+			fmt.Printf("failed to start server D with error: %s\n", err)
 		}
 		serverReadyChan <- true
 	}()
@@ -181,17 +182,17 @@ func disconnectTwoNodes() bool {
 }
 
 func main() {
-    fmt.Println("Running test: basic3Nodes")
-    if basic3Nodes() {
-        fmt.Println("Passed test: basic3Nodes")
-    } else {
-        fmt.Println("Failed test: basic3Nodes")
-    }
+	fmt.Println("Running test: basic3Nodes")
+	if basic3Nodes() {
+		fmt.Println("Passed test: basic3Nodes")
+	} else {
+		fmt.Println("Failed test: basic3Nodes")
+	}
 
-    fmt.Println("Running test: disconnectTwoNodes")
-    if disconnectTwoNodes() {
-        fmt.Println("Passed test: disconnectTwoNodes")
-    } else {
-        fmt.Println("Failed test: disconnectTwoNodes")
-    }
+	//fmt.Println("Running test: disconnectTwoNodes")
+	//if disconnectTwoNodes() {
+	//    fmt.Println("Passed test: disconnectTwoNodes")
+	//} else {
+	//    fmt.Println("Failed test: disconnectTwoNodes")
+	//}
 }
