@@ -162,17 +162,11 @@ func (ps *paxosStates) CreatePrepareMsg() ([]byte, error) {
 	ps.logger.Printf("CreatePrepareMsg: mtype = %d\n", msg.Mtype)
 	ps.logger.Printf("CreatePrepareMsg: seqNum = %d\n", msg.SeqNum)
 	msgB, err := json.Marshal(*msg)
-	/* for debug */
-	var t p_message
-	json.Unmarshal(msgB, &t)
-	ps.logger.Printf("CreatePrepareMsg: unmarshalled mtype = %d\n", t.Mtype)
-	ps.logger.Printf("CreatePrepareMsg: unmarshalled seqNum = %d\n", t.SeqNum)
 	if err != nil {
 		ps.logger.Printf("CreatePrepareMsg: error while marshalling. %s\n", err)
 		return nil, err
 	}
 	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
-	ps.logger.Printf("CreatePrepareMsg: msg string is %s\n", string(msgB))
 	if err != nil {
 		return nil, err
 	}
@@ -223,7 +217,6 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 	ps.logger.Printf("receivePrepareResponse: enter function\n")
 	ps.accedMutex.Lock()
-	ps.logger.Printf("receivePrepareResponse: get lock\n")
 	if ps.phase == Prepare {
 		if msg.Acc {
 			ps.numAcc++
