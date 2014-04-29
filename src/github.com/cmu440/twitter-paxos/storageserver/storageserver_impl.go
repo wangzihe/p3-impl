@@ -303,7 +303,8 @@ func (ss *storageServer) pingServers() bool {
 		ss.LOGV.Printf("ping server %s\n", port)
 		var fail bool = true
 		for index := 0; index < RETRY; index++ {
-			if rand.Float32() > ss.test.PingRate {
+			if rand.Float32() < ss.test.PingRate {
+				ss.LOGV.Printf("pingServers: dropped ping message\n")
 				continue
 			}
 			ss.LOGV.Printf("ping\n")
@@ -394,13 +395,17 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string, test paxos.
 	}
 	server.MsgListener = msgLn
 
-	// Wrap the storageserver before registering it for RPC
-	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(server))
-	if err != nil {
-		server.LOGV.Printf("NewStorageServer: error while registering rpc. %s\n", err)
-		return nil, err
+	if !test.DontRegister {
+		// Wrap the storageserver before registering it for RPC
+		err = rpc.RegisterName("StorageServer", storagerpc.Wrap(server))
+		if err != nil {
+			server.LOGV.Printf("NewStorageServer: error while registering rpc. %s\n", err)
+			return nil, err
+		}
+		rpc.HandleHTTP()
+	} else if test.Testing {
+		<-time.After(time.Second)
 	}
-	rpc.HandleHTTP()
 	go http.Serve(rpcLn, nil)
 
 	go server.networkHandler()

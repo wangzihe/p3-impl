@@ -1,178 +1,198 @@
-package tests
+package main
 
 import (
-	//"net"
+	"net"
 	//"net/http"
-	//"net/rpc"
+	"net/rpc"
 	//"time"
-    "fmt"
+	"fmt"
 
-	"github.com/cmu440/twitter-paxos/storageserver"
 	"github.com/cmu440/twitter-paxos/paxos"
+	"github.com/cmu440/twitter-paxos/storageserver"
 	//"github.com/cmu440/twitter-paxos/message"
-	//"github.com/cmu440/twitter-paxos/rpc/storagerpc"
+	"github.com/cmu440/twitter-paxos/rpc/storagerpc"
 )
 
-//type fakeServer struct {
-//}
+// basic 3 server configuration with no delays or dropped messages
+func basic3Nodes() bool {
 
-// basic 3 server configuration
-//func setup1Node2Fake() (bool, error) {
-//
-//    // SET UP FAKE SERVERS
-//	// set up listen sockets
-//	rpcLn1, err := net.Listen("tcp", ":9091")
-//	rpcLn2, err := net.Listen("tcp", ":9092")
-//	if err != nil {
-//		return false, err
-//	}
-//	msgLn1, err := net.Listen("tcp", ":9096")
-//	msgLn2, err := net.Listen("tcp", ":9097")
-//	if err != nil {
-//		return false, err
-//	}
-//    // TODO: figure out how to register
-//	err = rpc.RegisterName("StorageServer", storagerpc.Wrap(server))
-//	if err != nil {
-//		return nil, err
-//	}
-//	rpc.HandleHTTP()
-//	go http.Serve(rpcLn1, nil)
-//	go http.Serve(rpcLn2, nil)
-//	go networkHandler(msgLn1)
-//	go networkHandler(msgLn2)
-//
-//
-//    // SET UP REAL SERVER
-//    s1, err = NewStorageServer(":9090", ":9095", "./configRPC.txt", "./configMsg.txt")
-//    if err != nil {
-//        fmt.Println("failed to start server")
-//    }
-//
-//    // ping the real storage server to make sure its running
-//		var fail bool = true
-//		for index := 0; index < 5; index++ {
-//	        cli, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
-//			if err != nil {
-//				time.Sleep(time.Duration(1) * time.Second)
-//				continue
-//			} else {
-//				var a int = 1
-//				var b int = 2
-//				err = cli.Call("StorageServer.Ping", &a, &b)
-//				if err != nil {
-//					continue
-//				} else {
-//					fail = false
-//					break
-//				}
-//			}
-//		}
-//		if fail == true {
-//			return false
-//		}
-//    return true, nil
-//}
-//
-//func fakePing(a, b *int) error {
-//	fmt.Printf("fakePing called\n")
-//	return nil
-//}
-//
-//// This is the handler to handle messages received by the server.
-//func fakeNetworkHandler() {
-//    MsgHandler = message.NewMessageHandler()
-//	listener := ss.MsgListener
-//
-//	for {
-//		// read server message
-//		msgB, msgType, errR := readMsg(conn)
-//
-//		if errR != nil {
-//			fmt.Printf("networkHandler: error while reading msg. %s\n", errR)
-//		} else {
-//			switch msgType {
-//			case message.SERVER:
-//				// received a server message
-//				ss.parseServerMsg(msgB)
-//				conn.Close()
-//			case message.PAXOS:
-//				// received a paxos message
-//				// TODO use go routine to handle paxos message
-//				go ss.PaxosHandler.Interpret_message(msgB)
-//				conn.Close()
-//			}
-//		}
-//	}
-//}
-//
-//// This function read a high-level message from the connection.
-//// This message can embed a server message or a paxos message.
-//// The function will return the byte array for the message embeded
-//// inside the high-level message, message type and error
-//func readMsg(conn net.Conn) ([]byte, int, error) {
-//	reader := bufio.NewReader(conn)
-//	msgBytes, err := reader.ReadBytes('\n')
-//	if err != nil {
-//		fmt.Printf("readMsg: error while reading server message. %s\n", err)
-//		return nil, -1, err
-//	}
-//	generalMsgB, msgType, err := ss.MsgHandler.RetrieveMsg(msgBytes)
-//	if err != nil {
-//		return nil, -1, err
-//	} else {
-//		return generalMsgB, msgType, nil
-//	}
-//}
+	// default test parameters are 0 drop rate, 0 delay, no ignores
+	t1 := &paxos.TestSpec{Testing: true}
+	t := &paxos.TestSpec{DontRegister: true, Testing: true}
 
-// basic 3 server configuration
+	serverReadyChan := make(chan bool)
 
-// TODO: think about/finish this test
-func setup1Node2Fake() (bool, error) {
+	// SET UP SERVERS
+	go func() {
+		_, err := storageserver.NewStorageServer("9090", "9095", "./configRPC1.txt", "./configMsg1.txt", *t1)
+		if err != nil {
+			fmt.Printf("failed to start server s1 with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer("9091", "9096", "./configRPC1.txt", "./configMsg1.txt", *t)
+		if err != nil {
+			fmt.Printf("failed to start server s2 with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer("9092", "9097", "./configRPC1.txt", "./configMsg1.txt", *t)
+		if err != nil {
+			fmt.Printf("failed to start server s3 with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
 
-    t := &paxos.TestSpec{}
-
-	// SET UP REAL SERVER
-	s1, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC.txt", "./configMsg.txt", *t)
-	if err != nil {
-		fmt.Println("failed to start server")
+	// wait for all four servers to be ready
+	for i := 0; i < 3; i++ {
+		<-serverReadyChan
 	}
-    s2, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC.txt", "./configMsg.txt", *t)
-	if err != nil {
-		fmt.Println("failed to start server")
-	}
-    s3, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC.txt", "./configMsg.txt", *t)
-	if err != nil {
-		fmt.Println("failed to start server")
-	}
-    s1 = s1
-    s2 = s2
-    s3 = s3
 
-    return false, nil
-//  client commit request
-//	cli, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
-//	if err != nil {
-//		fmt.Printf("error dialing rpc. %s\n", err)
-//		return
-//	}
-//
-//	args := &storagerpc.ServerArgs{Val: "hello world"}
-//	var reply storagerpc.ServerReply
-//	err = cli.Call("StorageServer.Commit", args, &reply)
-//	if err != nil {
-//		fmt.Printf("error calling rpc. %s\n", err)
-//	}
+	cli1, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
+	if err != nil {
+		fmt.Printf("error dialing rpc. %s\n", err)
+		return false
+	}
+
+	cli2, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9091"))
+	if err != nil {
+		fmt.Printf("error dialing rpc. %s\n", err)
+		return false
+	}
+
+	args1 := &storagerpc.ServerArgs{Val: "v1"}
+	var reply1 storagerpc.ServerReply
+	err = cli1.Call("StorageServer.Commit", args1, &reply1)
+	if err != nil {
+		fmt.Printf("error calling rpc1. %s\n", err)
+		return false
+	}
+
+	args2 := &storagerpc.ServerArgs{Val: "v2"}
+	var reply2 storagerpc.ServerReply
+	err = cli2.Call("StorageServer.Commit", args2, &reply2)
+	if err != nil {
+		fmt.Printf("error calling rpc2. %s\n", err)
+		return false
+	}
+
+	if reply1.Val != "v1" {
+		fmt.Printf("incorrect value of v1: %s\n", reply1.Val)
+		return false
+	}
+	if reply2.Val != "v2" {
+		fmt.Printf("incorrect value of v2: %s\n", reply2.Val)
+		return false
+	}
+	return true
 }
 
 // four nodes, A, B, C, and D
-// 1. node D starts off disconnected
-// 2. node A wants to commit value "vA"
-// 3. passes prepare and accept phases, supported by nodes B and C, but
-// disconnects before sending any commit messages
-// 4. node D reconnects and tries to commit value "vD"
-// 5. in the prepare phase, node B or C gives A the value "vD"
-// 6. node D should commit "vD"
-func failSendCommits() (bool, error) {
-    return false, nil
+// no communication between A and D; all other nodes communicate fine
+// 2. node A wants to commit value "vA" and passes prepare and accept phases,
+//    supported by nodes B and C
+// 4. node D tries to commit value "vD"
+// 5. in the prepare phase, node B or C gives D the value "vA"
+// 6. node D should commit "vA"
+func disconnectTwoNodes() bool {
+
+	DIgnore := []string{"9095"}
+	AIgnore := []string{"9098"}
+
+	tA := &paxos.TestSpec{Ignore: AIgnore, Testing: true}
+	// default test parameters are 0 drop rate, 0 delay, no ignores
+	tBC := &paxos.TestSpec{DontRegister: true, Testing: true}
+	tD := &paxos.TestSpec{DontRegister: true, Ignore: DIgnore, Testing: true}
+
+	serverReadyChan := make(chan bool)
+
+	// SET UP SERVERS
+	go func() {
+		_, err := storageserver.NewStorageServer("9090", "9095", "./configRPC2.txt", "./configMsg2.txt", *tA)
+		if err != nil {
+			fmt.Printf("failed to start server A with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer("9091", "9096", "./configRPC2.txt", "./configMsg2.txt", *tBC)
+		if err != nil {
+			fmt.Printf("failed to start server B with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer("9092", "9097", "./configRPC2.txt", "./configMsg2.txt", *tBC)
+		if err != nil {
+			fmt.Printf("failed to start server C with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer("9093", "9098", "./configRPC2.txt", "./configMsg2.txt", *tD)
+		if err != nil {
+			fmt.Printf("failed to start server D with error: %s\n", err)
+		}
+		serverReadyChan <- true
+	}()
+
+	// wait for all four servers to be ready
+	for i := 0; i < 4; i++ {
+		<-serverReadyChan
+	}
+
+	cli1, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
+	if err != nil {
+		fmt.Printf("error dialing rpc. %s\n", err)
+		return false
+	}
+	cli2, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9093"))
+	if err != nil {
+		fmt.Printf("error dialing rpc. %s\n", err)
+		return false
+	}
+
+	args1 := &storagerpc.ServerArgs{Val: "v1"}
+	var reply1 storagerpc.ServerReply
+	err = cli1.Call("StorageServer.Commit", args1, &reply1)
+	if err != nil {
+		fmt.Printf("error calling rpc1. %s\n", err)
+		return false
+	}
+
+	args2 := &storagerpc.ServerArgs{Val: "v2"}
+	var reply2 storagerpc.ServerReply
+	err = cli2.Call("StorageServer.Commit", args2, &reply2)
+	if err != nil {
+		fmt.Printf("error calling rpc2. %s\n", err)
+		return false
+	}
+
+	if reply1.Val != "v1" {
+		fmt.Printf("incorrect value of v1: %s\n", reply1.Val)
+		return false
+	}
+	if reply2.Val != "v1" {
+		fmt.Printf("incorrect value of v2: %s\n", reply2.Val)
+		return false
+	}
+	return true
+}
+
+func main() {
+	fmt.Println("Running test: basic3Nodes")
+	if basic3Nodes() {
+		fmt.Println("Passed test: basic3Nodes")
+	} else {
+		fmt.Println("Failed test: basic3Nodes")
+	}
+
+	//fmt.Println("Running test: disconnectTwoNodes")
+	//if disconnectTwoNodes() {
+	//    fmt.Println("Passed test: disconnectTwoNodes")
+	//} else {
+	//    fmt.Println("Failed test: disconnectTwoNodes")
+	//}
 }

@@ -3,7 +3,7 @@ package paxos
 
 import (
 	"encoding/json"
-	//"fmt"
+	"fmt"
 	//"io/ioutil"
 	"log"
 	"net"
@@ -37,11 +37,21 @@ const (
 )
 
 type TestSpec struct {
-	// if rand.Float32() > rate { drop operation }
+	// if rand.Float32() < rate { drop operation }
+	// so 0 is perfect communication and 1 is no communication
 	PingRate, PrepSendRate, PrepRespondRate, AccSendRate, AccRespondRate, CommRate float32
 	// <-time.After(time.Duration(del) * time.Millisecond) before operation
 	// maybe add functionality for if del == -1 { wait random time }
 	PingDel, PrepSendDel, PrepRespondDel, AccSendDel, AccRespondDel, CommDel time.Duration
+
+	StartTime time.Duration
+
+	Ignore []string // list of HostPorts to ignore messages from
+
+	DontRegister bool // whether or not to call rpc.RegisterName (only call once)
+
+	Testing bool // true iff testing
+	DropAll bool // true iff currently dropping all messages
 }
 
 type paxosStates struct {
@@ -91,12 +101,8 @@ type p_message struct {
 // are unique to that node
 func NewPaxosStates(myHostPort string, nodes *list.List,
 	logger *log.Logger, databaseFile string, t TestSpec) PaxosStates {
-	ps := &paxosStates{
-		nodes:        nodes,
-		myHostPort:   myHostPort,
-		numNodes:     nodes.Len(),
-		databaseFile: databaseFile,
-		test:         t}
+	fmt.Printf("Number of nodes: %d\n", nodes.Len())
+	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), databaseFile: databaseFile, test: t}
 	var i int = 0
 	for e := nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -126,6 +132,16 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 	ps.logger = logger
 	ps.msgHandler = message.NewMessageHandler()
 
+	// start server late (i.e., drop all messages before StartTime)
+	if int64(ps.test.StartTime) > 0 {
+		ps.test.DropAll = true
+		go func() {
+			<-time.After(ps.test.StartTime)
+			ps.test.DropAll = false
+		}()
+
+	}
+
 	return ps
 }
 
@@ -137,6 +153,7 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	ps.logger.Printf("Prepare: about to set phase\n")
 	var iter int
 	ps.accedMutex.Lock()
+	ps.numAcc = 1
 	if ps.phase != None {
 		// server is busy handling the previous commit
 		ps.accedMutex.Unlock()
@@ -252,8 +269,7 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 	}
 	ps.accedMutex.Unlock()
 
-	// simulate network message loss and delay
-	if rand.Float32() > ps.test.PrepRespondRate {
+	if ps.test.DropAll || rand.Float32() < ps.test.PrepRespondRate {
 		ps.logger.Printf("receiveProposal: dropped prepare response message.\n")
 		return
 	}
@@ -421,8 +437,8 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 	}
 	ps.accedMutex.Unlock()
 
-	// simulate network delay and message loss
-	if rand.Float32() > ps.test.AccRespondRate {
+	// send out response message
+	if ps.test.DropAll || rand.Float32() < ps.test.AccRespondRate {
 		ps.logger.Printf("receiveProposal: dropped accept response message.\n")
 		return
 	}
@@ -652,23 +668,32 @@ func (ps *paxosStates) Interpret_message(marshalled []byte) {
 		ps.logger.Printf("Interpret_message: unmarshal error. %s\n", err)
 	}
 
+	// fmt.Printf("Server %s receiving message from %s\n", ps.myHostPort, msg.HostPort)
+
+	for i := 0; i < len(ps.test.Ignore); i++ {
+		if msg.HostPort == ps.test.Ignore[i] {
+			// fmt.Printf("Server %s ignoring message from %s\n", ps.myHostPort, msg.HostPort)
+			return // ignore message
+		}
+	}
+
 	switch msg.Mtype {
 	case None:
-		ps.logger.Printf("Interpret_message: wrong message type\n")
+		ps.logger.Printf("Interpret_message: wrong message type from %s\n", msg.HostPort)
 	case Prepare:
-		ps.logger.Printf("Interpret_message: received Prepare message\n")
+		ps.logger.Printf("Interpret_message: received Prepare message from %s\n", msg.HostPort)
 		ps.receiveProposal(msg)
 	case Accept:
-		ps.logger.Printf("Interpret_message: received Accept message\n")
+		ps.logger.Printf("Interpret_message: received Accept message from %s\n", msg.HostPort)
 		ps.receiveAccept(msg)
 	case PrepareReply:
-		ps.logger.Printf("Interpret_message: received Prepare reply\n")
+		ps.logger.Printf("Interpret_message: received Prepare reply from %s\n", msg.HostPort)
 		ps.receivePrepareResponse(msg)
 	case AcceptReply:
-		ps.logger.Printf("Interpret_message: received Accept reply\n")
+		ps.logger.Printf("Interpret_message: received Accept reply from %s\n", msg.HostPort)
 		ps.receiveAcceptResponse(msg)
 	case Commit:
-		ps.logger.Printf("Interpret_message: received Commit\n")
+		ps.logger.Printf("Interpret_message: received Commit from %s\n", msg.HostPort)
 		ps.receiveCommit(msg)
 	default:
 		ps.logger.Printf("fuck\n")
@@ -708,17 +733,22 @@ func (ps *paxosStates) broadCastMsg(msgB []byte, mType string) {
 			continue
 		}
 
+		if ps.test.DropAll {
+			ps.logger.Printf("dropped %s message.\n", mType)
+			continue
+		}
+
 		// drop messages for testing
-		if mType == "prep" && rand.Float32() > ps.test.PrepSendRate {
-			ps.logger.Printf("dropped prepare message. %s\n")
+		if mType == "prep" && rand.Float32() < ps.test.PrepSendRate {
+			ps.logger.Printf("dropped prepare message.\n")
 			continue
 		}
-		if mType == "acc" && rand.Float32() > ps.test.AccSendRate {
-			ps.logger.Printf("dropped accept message. %s\n")
+		if mType == "acc" && rand.Float32() < ps.test.AccSendRate {
+			ps.logger.Printf("dropped accept message.\n")
 			continue
 		}
-		if mType == "comm" && rand.Float32() > ps.test.CommRate {
-			ps.logger.Printf("dropped commit message. %s\n")
+		if mType == "comm" && rand.Float32() < ps.test.CommRate {
+			ps.logger.Printf("dropped commit message.\n")
 			continue
 		}
 
