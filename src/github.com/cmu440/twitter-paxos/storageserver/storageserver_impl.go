@@ -303,7 +303,8 @@ func (ss *storageServer) pingServers() bool {
 		ss.LOGV.Printf("ping server %s\n", port)
 		var fail bool = true
 		for index := 0; index < RETRY; index++ {
-			if rand.Float32() > ss.test.PingRate {
+			if rand.Float32() < ss.test.PingRate {
+            ss.LOGV.Printf("pingServers: dropped ping message\n")
 				continue
 			}
 			ss.LOGV.Printf("ping\n")

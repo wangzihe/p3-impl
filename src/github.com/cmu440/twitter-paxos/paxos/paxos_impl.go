@@ -36,7 +36,8 @@ const (
 )
 
 type TestSpec struct {
-	// if rand.Float32() > rate { drop operation }
+	// if rand.Float32() < rate { drop operation }
+    // so 0 is perfect communication and 1 is no communication
 	PingRate, prepSendRate, prepRespondRate, accSendRate, accRespondRate, commRate float32
 	// <-time.After(time.Duration(del) * time.Millisecond) before operation
 	// maybe add functionality for if del == -1 { wait random time }
@@ -223,7 +224,7 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 	ps.accedMutex.Unlock()
 
 	// send out response message
-	if rand.Float32() > ps.test.prepRespondRate {
+	if rand.Float32() < ps.test.prepRespondRate {
 		ps.logger.Printf("receiveProposal: dropped prepare response message.\n")
 		return
 	}
@@ -379,7 +380,7 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 	ps.accedMutex.Unlock()
 
 	// send out response message
-	if rand.Float32() > ps.test.accRespondRate {
+	if rand.Float32() < ps.test.accRespondRate {
 		ps.logger.Printf("receiveProposal: dropped accept response message.\n")
 		return
 	}
@@ -612,15 +613,15 @@ func (ps *paxosStates) broadCastMsg(msgB []byte, mType string) {
 		}
 
 		// drop messages for testing
-		if mType == "prep" && rand.Float32() > ps.test.prepSendRate {
+		if mType == "prep" && rand.Float32() < ps.test.prepSendRate {
 			ps.logger.Printf("dropped prepare message. %s\n")
 			continue
 		}
-		if mType == "acc" && rand.Float32() > ps.test.accSendRate {
+		if mType == "acc" && rand.Float32() < ps.test.accSendRate {
 			ps.logger.Printf("dropped accept message. %s\n")
 			continue
 		}
-		if mType == "comm" && rand.Float32() > ps.test.commRate {
+		if mType == "comm" && rand.Float32() < ps.test.commRate {
 			ps.logger.Printf("dropped commit message. %s\n")
 			continue
 		}
