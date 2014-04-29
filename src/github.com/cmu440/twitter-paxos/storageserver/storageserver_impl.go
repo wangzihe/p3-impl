@@ -10,12 +10,12 @@ import (
 	"fmt"
 	_ "github.com/mattn/go-sqlite3"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/rpc"
 	"os"
 	"time"
-    "math/rand"
 
 	"github.com/cmu440/twitter-paxos/message"
 	"github.com/cmu440/twitter-paxos/paxos"
@@ -304,7 +304,7 @@ func (ss *storageServer) pingServers() bool {
 		var fail bool = true
 		for index := 0; index < RETRY; index++ {
 			if rand.Float32() < ss.test.PingRate {
-            ss.LOGV.Printf("pingServers: dropped ping message\n")
+				ss.LOGV.Printf("pingServers: dropped ping message\n")
 				continue
 			}
 			ss.LOGV.Printf("ping\n")
@@ -350,7 +350,7 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string, test paxos.
 	server.ServerRPCPorts = list.New()
 	server.ServerMsgPorts = list.New()
 	server.MsgHandler = message.NewMessageHandler()
-    server.test = test
+	server.test = test
 
 	// create database file
 	databaseFile := "./storage" + portMsg + ".db"

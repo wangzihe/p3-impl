@@ -1,82 +1,91 @@
-package tests
+package main
 
 import (
-	//"net"
+	"net"
 	//"net/http"
-	//"net/rpc"
+	"net/rpc"
 	//"time"
-    "fmt"
+	"fmt"
 
-	"github.com/cmu440/twitter-paxos/storageserver"
 	"github.com/cmu440/twitter-paxos/paxos"
+	"github.com/cmu440/twitter-paxos/storageserver"
 	//"github.com/cmu440/twitter-paxos/message"
-	//"github.com/cmu440/twitter-paxos/rpc/storagerpc"
+	"github.com/cmu440/twitter-paxos/rpc/storagerpc"
 )
 
-//type TestSpec struct {
-//	// if rand.Float32() > rate { drop operation }
-//	PingRate, prepSendRate, prepRespondRate, accSendRate, accRespondRate, commRate float32
-//	// <-time.After(time.Duration(del) * time.Millisecond) before operation
-//	// maybe add functionality for if del == -1 { wait random time }
-//	PingDel, prepSendDel, prepRespondDel, accSendDel, accRespondDel, commDel time.Duration
-//}
-
-
 // basic 3 server configuration with no delays or dropped messages
-func setup1Node2Fake() (bool, error) {
+func basic3Nodes() bool {
 
-    // default test parameters are 0 drop rate, 0 delay, no ignores
-    t := &paxos.TestSpec{}
+	// default test parameters are 0 drop rate, 0 delay, no ignores
+	t := &paxos.TestSpec{}
+
+	serverReadyChan := make(chan bool)
 
 	// SET UP SERVERS
-	s1, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC1.txt", "./configMsg1.txt", *t)
-	if err != nil {
-		fmt.Println("failed to start server s1")
-	}
-    s2, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC1.txt", "./configMsg1.txt", *t)
-	if err != nil {
-		fmt.Println("failed to start server s2")
-	}
-    s3, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC1.txt", "./configMsg1.txt", *t)
-	if err != nil {
-		fmt.Println("failed to start server s3")
+	go func() {
+		_, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC1.txt", "./configMsg1.txt", *t)
+		if err != nil {
+			fmt.Println("failed to start server s1")
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC1.txt", "./configMsg1.txt", *t)
+		if err != nil {
+			fmt.Println("failed to start server s2")
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC1.txt", "./configMsg1.txt", *t)
+		if err != nil {
+			fmt.Println("failed to start server s3")
+		}
+		serverReadyChan <- true
+	}()
+
+	// wait for all four servers to be ready
+	for i := 0; i < 3; i++ {
+		<-serverReadyChan
 	}
 
 	cli1, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
 	if err != nil {
 		fmt.Printf("error dialing rpc. %s\n", err)
-		return
+		return false
 	}
 
 	cli2, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9091"))
 	if err != nil {
 		fmt.Printf("error dialing rpc. %s\n", err)
-		return
+		return false
 	}
 
 	args1 := &storagerpc.ServerArgs{Val: "v1"}
 	var reply1 storagerpc.ServerReply
-	err = cli1.Call("StorageServer.Commit", args, &reply)
+	err = cli1.Call("StorageServer.Commit", args1, &reply1)
 	if err != nil {
 		fmt.Printf("error calling rpc1. %s\n", err)
+		return false
 	}
 
 	args2 := &storagerpc.ServerArgs{Val: "v2"}
-	var reply1 storagerpc.ServerReply
-	err = cli2.Call("StorageServer.Commit", args, &reply)
+	var reply2 storagerpc.ServerReply
+	err = cli2.Call("StorageServer.Commit", args2, &reply2)
 	if err != nil {
 		fmt.Printf("error calling rpc2. %s\n", err)
+		return false
 	}
 
-    if reply1.Val != "v1" {
+	if reply1.Val != "v1" {
 		fmt.Printf("incorrect value of v1: %s\n", reply1.Val)
-        return false, nil
-    }
-    if  reply2.Val != "v2" {
+		return false
+	}
+	if reply2.Val != "v2" {
 		fmt.Printf("incorrect value of v2: %s\n", reply2.Val)
-        return false, nil
-    }
-    return true, nil
+		return false
+	}
+	return true
 }
 
 // four nodes, A, B, C, and D
@@ -86,55 +95,103 @@ func setup1Node2Fake() (bool, error) {
 // 4. node D tries to commit value "vD"
 // 5. in the prepare phase, node B or C gives D the value "vA"
 // 6. node D should commit "vA"
-func failSendCommits() (bool, error) {
+func disconnectTwoNodes() bool {
 
-    DIgnore := [...]string{"localhost:9095"}
-    AIgnore := [...]string{"localhost:9098"}
+	DIgnore := []string{"localhost:9095"}
+	AIgnore := []string{"localhost:9098"}
 
-    tA := &paxos.TestSpec{Ignore:AIgnore}
-    // default test parameters are 0 drop rate, 0 delay, no ignores
-    tBC := &paxos.TestSpec{}
-    tD := &paxos.TestSpec{Ignore:DIgnore}
+	tA := &paxos.TestSpec{Ignore: AIgnore}
+	// default test parameters are 0 drop rate, 0 delay, no ignores
+	tBC := &paxos.TestSpec{}
+	tD := &paxos.TestSpec{Ignore: DIgnore}
 
-	// SET UP REAL SERVER
-	A, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC1.txt", "./configMsg1.txt", *tA)
-	if err != nil {
-		fmt.Println("failed to start server A")
+	serverReadyChan := make(chan bool)
+
+	// SET UP SERVERS
+	go func() {
+		_, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC1.txt", "./configMsg1.txt", *tA)
+		if err != nil {
+			fmt.Println("failed to start server A")
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC1.txt", "./configMsg1.txt", *tBC)
+		if err != nil {
+			fmt.Println("failed to start server B")
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC1.txt", "./configMsg1.txt", *tBC)
+		if err != nil {
+			fmt.Println("failed to start server C")
+		}
+		serverReadyChan <- true
+	}()
+	go func() {
+		_, err := storageserver.NewStorageServer(":9093", ":9098", "./configRPC1.txt", "./configMsg1.txt", *tD)
+		if err != nil {
+			fmt.Println("failed to start server D")
+		}
+		serverReadyChan <- true
+	}()
+
+	// wait for all four servers to be ready
+	for i := 0; i < 4; i++ {
+		<-serverReadyChan
 	}
-    B, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC1.txt", "./configMsg1.txt", *tBC)
+
+	cli1, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
 	if err != nil {
-		fmt.Println("failed to start server B")
+		fmt.Printf("error dialing rpc. %s\n", err)
+		return false
 	}
-    C, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC1.txt", "./configMsg1.txt", *tBC)
+	cli2, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9093"))
 	if err != nil {
-		fmt.Println("failed to start server C")
-	}
-    D, err := storageserver.NewStorageServer(":9093", ":9098", "./configRPC1.txt", "./configMsg1.txt", *tD)
-	if err != nil {
-		fmt.Println("failed to start server D")
+		fmt.Printf("error dialing rpc. %s\n", err)
+		return false
 	}
 
 	args1 := &storagerpc.ServerArgs{Val: "v1"}
 	var reply1 storagerpc.ServerReply
-	err = cli1.Call("StorageServer.Commit", args, &reply)
+	err = cli1.Call("StorageServer.Commit", args1, &reply1)
 	if err != nil {
 		fmt.Printf("error calling rpc1. %s\n", err)
+		return false
 	}
 
 	args2 := &storagerpc.ServerArgs{Val: "v2"}
-	var reply1 storagerpc.ServerReply
-	err = cli2.Call("StorageServer.Commit", args, &reply)
+	var reply2 storagerpc.ServerReply
+	err = cli2.Call("StorageServer.Commit", args2, &reply2)
 	if err != nil {
 		fmt.Printf("error calling rpc2. %s\n", err)
+		return false
 	}
 
-    if reply1.Val != "v1" {
+	if reply1.Val != "v1" {
 		fmt.Printf("incorrect value of v1: %s\n", reply1.Val)
-        return false, nil
-    }
-    if  reply2.Val != "v1" {
+		return false
+	}
+	if reply2.Val != "v1" {
 		fmt.Printf("incorrect value of v2: %s\n", reply2.Val)
-        return false, nil
+		return false
+	}
+	return true
+}
+
+func main() {
+    fmt.Println("Running test: basic3Nodes")
+    if basic3Nodes() {
+        fmt.Println("Passed test: basic3Nodes")
+    } else {
+        fmt.Println("Failed test: basic3Nodes")
     }
-    return true, nil
+
+    fmt.Println("Running test: disconnectTwoNodes")
+    if disconnectTwoNodes() {
+        fmt.Println("Passed test: disconnectTwoNodes")
+    } else {
+        fmt.Println("Failed test: disconnectTwoNodes")
+    }
 }

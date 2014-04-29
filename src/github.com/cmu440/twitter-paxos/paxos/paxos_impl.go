@@ -16,9 +16,9 @@ import (
 	"database/sql"
 	"errors"
 	_ "github.com/mattn/go-sqlite3"
-    "math/rand"
+	"math/rand"
 	"sync"
-    "time"
+	"time"
 
 	"github.com/cmu440/twitter-paxos/message"
 )
@@ -37,11 +37,12 @@ const (
 
 type TestSpec struct {
 	// if rand.Float32() < rate { drop operation }
-    // so 0 is perfect communication and 1 is no communication
+	// so 0 is perfect communication and 1 is no communication
 	PingRate, prepSendRate, prepRespondRate, accSendRate, accRespondRate, commRate float32
 	// <-time.After(time.Duration(del) * time.Millisecond) before operation
 	// maybe add functionality for if del == -1 { wait random time }
 	PingDel, prepSendDel, prepRespondDel, accSendDel, accRespondDel, commDel time.Duration
+	Ignore                                                                   []string // list of HostPorts to ignore messages from
 }
 
 type paxosStates struct {
@@ -547,6 +548,12 @@ func (ps *paxosStates) Interpret_message(marshalled []byte) {
 	err := json.Unmarshal(marshalled, &msg)
 	if err != nil {
 		ps.logger.Printf("Interpret_message: unmarshal error. %s\n", err)
+	}
+
+	for i := 0; i < len(ps.test.Ignore); i++ {
+		if msg.HostPort == ps.test.Ignore[i] {
+			return // ignore message
+		}
 	}
 
 	switch msg.Mtype {
