@@ -15,6 +15,7 @@ import (
 	"net/rpc"
 	"os"
 	"time"
+    "math/rand"
 
 	"github.com/cmu440/twitter-paxos/message"
 	"github.com/cmu440/twitter-paxos/paxos"
@@ -46,6 +47,7 @@ type storageServer struct {
 	LOGV           *log.Logger        // server logger
 	MsgHandler     message.MessageLib // message handler
 	PaxosHandler   paxos.PaxosStates  // paxos handler
+	test           paxos.TestSpec     // message drop-rates/delays for testing
 }
 
 // Server message. Servers will send marshalled string of
@@ -301,6 +303,9 @@ func (ss *storageServer) pingServers() bool {
 		ss.LOGV.Printf("ping server %s\n", port)
 		var fail bool = true
 		for index := 0; index < RETRY; index++ {
+			if rand.Float32() > ss.test.PingRate {
+				continue
+			}
 			ss.LOGV.Printf("ping\n")
 			cli, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", port))
 			if err != nil {
@@ -336,7 +341,7 @@ func (ss *storageServer) pingServers() bool {
 // configMsg: path to the configuration file for the server. The
 //            configuration file contains the list of message ports
 //            of storage servers.
-func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageServer, error) {
+func NewStorageServer(portRPC, portMsg, configRPC, configMsg string, test paxos.TestSpec) (StorageServer, error) {
 	fmt.Printf("new storage server created\n")
 	server := new(storageServer)
 	server.PortRPC = portRPC
@@ -344,6 +349,7 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 	server.ServerRPCPorts = list.New()
 	server.ServerMsgPorts = list.New()
 	server.MsgHandler = message.NewMessageHandler()
+    server.test = test
 
 	// create database file
 	databaseFile := "./storage" + portMsg + ".db"
@@ -415,12 +421,13 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string) (StorageSer
 		return nil, errors.New("not all servers exist")
 	}
 	server.PaxosHandler = paxos.NewPaxosStates(portMsg,
-		server.ServerMsgPorts, server.LOGV, databaseFile)
+		server.ServerMsgPorts, server.LOGV, databaseFile, test)
 
 	return server, nil
 }
 
 func (ss *storageServer) Ping(a, b *int) error {
+	<-time.After(ss.test.PingDel)
 	fmt.Printf("ping called\n")
 	return nil
 }

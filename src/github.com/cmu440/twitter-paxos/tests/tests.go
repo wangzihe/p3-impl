@@ -1,15 +1,16 @@
 package tests
 
 import (
-	"net"
-	"net/http"
-	"net/rpc"
+	//"net"
+	//"net/http"
+	//"net/rpc"
 	//"time"
+    "fmt"
 
 	"github.com/cmu440/twitter-paxos/storageserver"
-	//"github.com/cmu440/twitter-paxos/paxos"
-	"github.com/cmu440/twitter-paxos/message"
-	"github.com/cmu440/twitter-paxos/rpc/storagerpc"
+	"github.com/cmu440/twitter-paxos/paxos"
+	//"github.com/cmu440/twitter-paxos/message"
+	//"github.com/cmu440/twitter-paxos/rpc/storagerpc"
 )
 
 //type fakeServer struct {
@@ -125,26 +126,53 @@ import (
 //}
 
 // basic 3 server configuration
+
+// TODO: think about/finish this test
 func setup1Node2Fake() (bool, error) {
 
+    t := &paxos.TestSpec{}
+
 	// SET UP REAL SERVER
-	s1, err = NewStorageServer(":9090", ":9095", "./configRPC.txt", "./configMsg.txt")
-    s2, err = NewStorageServer(":9091", ":9096", "./configRPC.txt", "./configMsg.txt")
-    s3, err = NewStorageServer(":9092", ":9097", "./configRPC.txt", "./configMsg.txt")
+	s1, err := storageserver.NewStorageServer(":9090", ":9095", "./configRPC.txt", "./configMsg.txt", *t)
 	if err != nil {
 		fmt.Println("failed to start server")
 	}
-
-	cli, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
+    s2, err := storageserver.NewStorageServer(":9091", ":9096", "./configRPC.txt", "./configMsg.txt", *t)
 	if err != nil {
-		fmt.Printf("error dialing rpc. %s\n", err)
-		return
+		fmt.Println("failed to start server")
 	}
-
-	args := &storagerpc.ServerArgs{Val: "hello world"}
-	var reply storagerpc.ServerReply
-	err = cli.Call("StorageServer.Commit", args, &reply)
+    s3, err := storageserver.NewStorageServer(":9092", ":9097", "./configRPC.txt", "./configMsg.txt", *t)
 	if err != nil {
-		fmt.Printf("error calling rpc. %s\n", err)
+		fmt.Println("failed to start server")
 	}
+    s1 = s1
+    s2 = s2
+    s3 = s3
+
+    return false, nil
+//  client commit request
+//	cli, err := rpc.DialHTTP("tcp", net.JoinHostPort("localhost", "9090"))
+//	if err != nil {
+//		fmt.Printf("error dialing rpc. %s\n", err)
+//		return
+//	}
+//
+//	args := &storagerpc.ServerArgs{Val: "hello world"}
+//	var reply storagerpc.ServerReply
+//	err = cli.Call("StorageServer.Commit", args, &reply)
+//	if err != nil {
+//		fmt.Printf("error calling rpc. %s\n", err)
+//	}
+}
+
+// four nodes, A, B, C, and D
+// 1. node D starts off disconnected
+// 2. node A wants to commit value "vA"
+// 3. passes prepare and accept phases, supported by nodes B and C, but
+// disconnects before sending any commit messages
+// 4. node D reconnects and tries to commit value "vD"
+// 5. in the prepare phase, node B or C gives A the value "vD"
+// 6. node D should commit "vD"
+func failSendCommits() (bool, error) {
+    return false, nil
 }
