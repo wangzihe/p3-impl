@@ -562,6 +562,9 @@ func (ps *paxosStates) CreateCommitMsg() ([]byte, error) {
 // This function is used by an acceptor to react to a commit
 // message. It will react corresponding to the current state.
 func (ps *paxosStates) receiveCommit(msg p_message) {
+	// grab lock here to prevent Prepare gets called before
+	// iteration number gets updated. Prevent Prepare from
+	// using wrong iteration number.
 	ps.accedMutex.Lock()
 	ps.accingMutex.Lock()
 	val := msg.Val
