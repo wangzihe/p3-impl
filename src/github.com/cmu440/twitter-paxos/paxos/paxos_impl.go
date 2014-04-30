@@ -35,6 +35,7 @@ const (
 	AcceptReply
 	Commit
 	NOOP
+	NOOPReply
 )
 
 type TestSpec struct {
@@ -66,8 +67,8 @@ type paxosStates struct {
 	phase          Phase          // which stage of paxos the server is at
 	iteration      int            // what this paxos thinks the iteration number is
 	commitedVals   map[int]string // commited values for each iteration
-	behind         bool           // True means the node's iteration is behind
 	//accedVals      map[int]string // last acced value for each iteration TODO why do we need this?
+	unknow int // number of servers that don't have a commit value for a particular iteration
 
 	accingMutex *sync.Mutex // protects the following variables
 	n_h         int         // highest seqNum seen so far; 0 if none has seen
@@ -79,6 +80,7 @@ type paxosStates struct {
 
 	prepChan     chan bool          // channel for reporting quorum during prepare phase
 	accChan      chan bool          // channel for reporting quorum during accept phase
+	noopChan     chan bool          // channel for noop communication to signal noop recovery to continue
 	logger       *log.Logger        // logger for paxos (same as the one for server)
 	commitLogger *log.Logger        // logger for commits
 	msgHandler   message.MessageLib // message handler
@@ -104,7 +106,11 @@ type p_message struct {
 func NewPaxosStates(myHostPort string, nodes *list.List,
 	logger *log.Logger, databaseFile string, t TestSpec) PaxosStates {
 	fmt.Printf("Number of nodes: %d\n", nodes.Len())
-	ps := &paxosStates{nodes: nodes, myHostPort: myHostPort, numNodes: nodes.Len(), databaseFile: databaseFile, test: t}
+	ps := &paxosStates{nodes: nodes,
+		myHostPort:   myHostPort,
+		numNodes:     nodes.Len(),
+		databaseFile: databaseFile,
+		test:         t}
 	var i int = 0
 	for e := nodes.Front(); e != nil; e = e.Next() {
 		port := e.Value.(string)
@@ -122,8 +128,8 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 	ps.numRej = 0
 	ps.phase = None
 	ps.iteration = 0
-	ps.behind = false
 	ps.commitedVals = make(map[int]string)
+	ps.unknow = 0
 	ps.n_h = 0
 	ps.n_a = -1
 	ps.v_a = ""
@@ -131,6 +137,7 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 	ps.prep_n = -1
 	ps.prepChan = make(chan bool)
 	ps.accChan = make(chan bool)
+	ps.noopChan = make(chan bool)
 	ps.logger = logger
 	ps.msgHandler = message.NewMessageHandler()
 
@@ -163,12 +170,20 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	ps.numAcc = 1
 	if ps.phase != None {
 		// server is busy handling the previous commit
+		// or the server is in noop recovery
 		ps.accedMutex.Unlock()
 		return false, nil
 	}
 	ps.phase = Prepare
 	iter = ps.iteration
-	ps.numAcc += 1
+	// since we are holding accedMutex, we are the only one
+	// reading v_a and n_a. Hence, we don't need to grab lock.
+	if ps.n_a != -1 {
+		// the proposing node itself has uncommitted value.
+		// keep track of the value.
+		ps.prep_v = ps.v_a
+		ps.prep_n = ps.n_a
+	}
 	ps.accedMutex.Unlock()
 
 	// create prepare message
@@ -272,6 +287,7 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 	} else {
 		// this server is leader. Prevent two leaders in one system
 		// leader must reject a prepare request of another node
+		// OR the server is in no-op recovery
 		ps.logger.Printf("receiveProposal: reject proposal from server %s since I am leader.\n", msg.HostPort)
 		resp.Acc = false
 		resp.Iteration = -1
@@ -321,11 +337,6 @@ func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 				// rejected due to unmatching iteration number
 				if msg.Iteration == ps.iteration {
 					// we are behind.
-					// TODO should we start no-op recovery after
-					//      a majority says we are behind?
-					ps.behind = true
-					// TODO do we need to commit the value returned by
-					//      the node?
 					ps.commitedVals[ps.iteration] = msg.Val
 				}
 			}
@@ -438,6 +449,7 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 	} else {
 		// this server is leader. Prevent two leaders in one system
 		// leader must reject an accept request of another node
+		// OR this server is in no-op recovery
 		resp.Acc = false
 	}
 	ps.accedMutex.Unlock()
@@ -546,7 +558,12 @@ func (ps *paxosStates) commitVal() (string, error) {
 func (ps *paxosStates) CreateCommitMsg() ([]byte, error) {
 	// no need to grab lock since we are the only thread reading mySeqNum
 	// and v_a
-	msg := &p_message{Mtype: Commit, HostPort: ps.myHostPort, SeqNum: ps.mySeqNum, Val: ps.v_a}
+	msg := &p_message{
+		Mtype:     Commit,
+		HostPort:  ps.myHostPort,
+		SeqNum:    ps.mySeqNum,
+		Val:       ps.v_a,
+		Iteration: ps.iteration}
 	msgB, err := json.Marshal(msg)
 	if err != nil {
 		return nil, err
@@ -566,39 +583,51 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 	// iteration number gets updated. Prevent Prepare from
 	// using wrong iteration number.
 	ps.accedMutex.Lock()
-	ps.accingMutex.Lock()
-	val := msg.Val
-	ps.logger.Printf("receiveCommit: value to be commited is %s at iteration %d\n", val, ps.iteration)
+	if ps.phase != None {
+		// this commite message might be late and the acceptor
+		// is already handling another client request. Ignore
+		ps.accedMutex.Unlock()
+		return
+	} else {
+		if msg.Iteration != ps.iteration {
+			// this commit message is from previous iterations
+			// Ignore
+			ps.accedMutex.Unlock()
+			return
+		}
+		ps.accingMutex.Lock()
+		val := msg.Val
+		ps.logger.Printf("receiveCommit: value to be commited is %s at iteration %d\n", val, ps.iteration)
 
-	/* log the commit */
-	ps.commitLogger.Printf("commit:" + val)
+		/* log the commit */
+		ps.commitLogger.Printf("commit:" + val)
+		ps.commitedVals[ps.iteration] = val
 
-	/* udpate iteration count */
-	ps.commitedVals[ps.iteration] = val
-	ps.iteration += 1
+		/* udpate iteration count */
+		ps.iteration += 1
+		ps.logger.Printf("receiveCommit: finished upding iteration count.\n")
 
-	ps.logger.Printf("receiveCommit: finished upding iteration count.\n")
+		/* reset state */
+		ps.n_a = -1
+		ps.v_a = ""
+		ps.accingMutex.Unlock()
+		ps.accedMutex.Unlock()
 
-	/* reset state */
-	ps.n_a = -1
-	ps.v_a = ""
-	ps.accingMutex.Unlock()
-	ps.accedMutex.Unlock()
+		// store the string into database
+		//TODO Need to deal with duplicates
+		db, err := sql.Open("sqlite3", ps.databaseFile)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer db.Close()
+		query := "insert into storage(tweet, count) values ('" + val + "'"
+		query += ", 1)"
+		_, err = db.Exec(query)
+		if err != nil {
+			ps.logger.Printf("receiveCommit: error while executing query. %s\n", err)
+		}
+	}
 	ps.logger.Printf("receiveCommit: finished resetting state.\n")
-
-	// store the string into database
-	//TODO Need to deal with duplicates
-	db, err := sql.Open("sqlite3", ps.databaseFile)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer db.Close()
-	query := "insert into storage(tweet, count) values ('" + val + "'"
-	query += ", 1)"
-	_, err = db.Exec(query)
-	if err != nil {
-		ps.logger.Printf("receiveCommit: error while executing query. %s\n", err)
-	}
 }
 
 // This function does a commit. It is the only access point for server
@@ -653,7 +682,37 @@ func (ps *paxosStates) PaxosCommit(val string) (string, error) {
 // for a iteration number, it should commit that value. The recovery
 // should stop when a majority of nodes return no value for a iteration
 // number.
-func (ps *paxosStates) noopRecovery() {
+func (ps *paxosStates) NoopRecovery() error {
+	ps.logger.Printf("noopRecovery: enter function\n")
+	// set phase
+	ps.accedMutex.Lock()
+	ps.phase = NOOP
+	ps.accedMutex.Unlock()
+
+	for index := 0; index >= 0; index++ {
+		generalMsgB, err := ps.CreateNoopMsg(index)
+		if err != nil {
+			ps.logger.Printf("noopRecovery: error while creating message. %s\n", err)
+			return err
+		}
+
+		ps.broadCastMsg(generalMsgB, "noop")
+
+		// wait for a response
+		val := <-ps.noopChan
+		if val {
+			// no one knows value to this iteration
+			// stop recovery
+			ps.accedMutex.Lock()
+			ps.phase = None
+			ps.iteration = index
+			ps.accedMutex.Unlock()
+			ps.logger.Printf("noopRecovery: finished recovery\n")
+			return nil
+		}
+	}
+
+	return nil
 }
 
 // This function creates a noop message for a particular iteration
@@ -673,6 +732,66 @@ func (ps *paxosStates) CreateNoopMsg(iter int) ([]byte, error) {
 	}
 
 	return generalMsg, nil
+}
+
+// This function is used by a server upon receiving a no-op message.
+// It will react corresponding to the current state of the server.
+func (ps *paxosStates) ReceiveNoopMsg(msg p_message) {
+	ps.logger.Printf("ReceiveNoopMsg: received noop msg\n")
+	resp := &p_message{
+		Mtype:     NOOPReply,
+		HostPort:  ps.myHostPort,
+		Iteration: msg.Iteration}
+	ps.accedMutex.Lock()
+	val, ok := ps.commitedVals[msg.Iteration]
+	if ok {
+		// this server has commited a value for this iteration.
+		resp.Val = val
+		ps.logger.Printf("ReceiveNoopMsg: reply with val %s\n", val)
+	} else {
+		resp.Val = ""
+		ps.logger.Printf("ReceiveNoopMsg: don't know the value\n")
+	}
+	ps.accedMutex.Unlock()
+
+	// send out response message
+	msgB, err := json.Marshal(resp)
+	generalMsg, err := ps.msgHandler.CreateMsg(message.PAXOS, string(msgB))
+	if err != nil {
+		ps.logger.Printf("receiveProposal: error creating message. %s\n", err)
+	} else {
+		err = ps.sendMsg(msg.HostPort, generalMsg)
+		if err != nil {
+			ps.logger.Printf("receiveProposal: error sending message. %s\n", err)
+		}
+	}
+}
+
+// This function is used by a server upon receiving a no-op reply.
+// It will react corresponding to the message and make updates to
+// the current state.
+func (ps *paxosStates) ReceiveNoopReply(msg p_message) {
+	ps.logger.Printf("ReceiveNoopReply: received a reply\n")
+	ps.accedMutex.Lock()
+	if ps.phase == NOOP {
+		if msg.Val != "" {
+			_, ok := ps.commitedVals[msg.Iteration]
+			if ok == false {
+				ps.commitedVals[msg.Iteration] = msg.Val
+				ps.commitLogger.Printf("commit:" + msg.Val)
+				ps.noopChan <- false
+			}
+		} else {
+			ps.unknow += 1
+			ps.logger.Printf("ReceiveNoopReply: number of unknow is %d\n", ps.unknow)
+			if 2*ps.unknow > ps.numNodes {
+				ps.noopChan <- true
+				ps.unknow = 0
+			}
+		}
+
+	}
+	ps.accedMutex.Unlock()
 }
 
 // unmarshalls and determines the type of a p_message
@@ -711,6 +830,10 @@ func (ps *paxosStates) Interpret_message(marshalled []byte) {
 	case Commit:
 		ps.logger.Printf("Interpret_message: received Commit from %s\n", msg.HostPort)
 		ps.receiveCommit(msg)
+	case NOOP:
+		ps.ReceiveNoopMsg(msg)
+	case NOOPReply:
+		ps.ReceiveNoopReply(msg)
 	default:
 		ps.logger.Printf("fuck\n")
 	}

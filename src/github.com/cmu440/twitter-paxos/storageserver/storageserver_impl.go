@@ -422,6 +422,8 @@ func NewStorageServer(portRPC, portMsg, configRPC, configMsg string, test paxos.
 		return nil, errors.New("not all servers exist")
 	}
 
+	server.PaxosHandler.NoopRecovery()
+
 	return server, nil
 }
 

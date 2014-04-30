@@ -20,4 +20,6 @@ type PaxosStates interface {
 	PaxosCommit(string) (string, error)
 
 	Interpret_message([]byte)
+
+	NoopRecovery() error
 }
