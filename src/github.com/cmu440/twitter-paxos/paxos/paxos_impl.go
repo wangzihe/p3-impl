@@ -17,6 +17,7 @@ import (
 	"errors"
 	_ "github.com/mattn/go-sqlite3"
 	"math/rand"
+	"os"
 	"sync"
 	"time"
 
@@ -79,6 +80,7 @@ type paxosStates struct {
 	prepChan     chan bool          // channel for reporting quorum during prepare phase
 	accChan      chan bool          // channel for reporting quorum during accept phase
 	logger       *log.Logger        // logger for paxos (same as the one for server)
+	commitLogger *log.Logger        // logger for commits
 	msgHandler   message.MessageLib // message handler
 	databaseFile string             // database used by storage server
 
@@ -132,6 +134,11 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 	ps.logger = logger
 	ps.msgHandler = message.NewMessageHandler()
 
+	// create commit logger
+	filename := "commit" + ps.myHostPort + ".txt"
+	logFile, _ := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0666)
+	ps.commitLogger = log.New(logFile, "", log.Lshortfile)
+
 	// start server late (i.e., drop all messages before StartTime)
 	if int64(ps.test.StartTime) > 0 {
 		ps.test.DropAll = true
@@ -150,7 +157,7 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 // being successfully made. Otherwise, it will return false.
 func (ps *paxosStates) Prepare() (bool, error) {
 	// set phase and extract iteration number
-	ps.logger.Printf("Prepare: about to set phase\n")
+	ps.logger.Printf("Prepare: enter function\n")
 	var iter int
 	ps.accedMutex.Lock()
 	ps.numAcc = 1
@@ -163,21 +170,16 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	iter = ps.iteration
 	ps.numAcc += 1
 	ps.accedMutex.Unlock()
-	ps.logger.Printf("Prepare: finished setting phase.\n")
 
 	// create prepare message
-	ps.logger.Printf("Prepare: about to create prepare message\n")
 	msgB, err := ps.CreatePrepareMsg(iter)
 	if err != nil {
 		ps.logger.Printf("Prepare: error while creating prepare message. %s\n", err)
 		return false, err
 	}
-	ps.logger.Printf("Prepare: finished creating prepare message\n")
 	<-time.After(ps.test.PrepSendDel)
 	// send prepare message to the network
-	ps.logger.Printf("Prepare: about to broadcast\n")
 	ps.broadCastMsg(msgB, "prep")
-	ps.logger.Printf("Prepare: finished broadcast\n")
 
 	// wait for the majority to respond. Note that paxos doesn't
 	// guarantee liveness. Therefore, we might wait forever due
@@ -191,6 +193,8 @@ func (ps *paxosStates) Prepare() (bool, error) {
 	if acc {
 		ps.logger.Printf("Prepare: prepare-ok from majority\n")
 		toReturn = true
+	} else {
+		ps.logger.Printf("Prepare: prepare-reject from majority\n")
 	}
 
 	return toReturn, nil
@@ -236,18 +240,21 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 			// start normal paxos algorithm
 			ps.accingMutex.Lock()
 			if msg.SeqNum > ps.n_h { // accept
+				ps.logger.Printf("receiveProposal: accept proposal from server %s with v.a set to %s and n_a be %d at iteration %d\n", msg.HostPort, ps.v_a, ps.n_a, ps.iteration)
 				resp.Acc = true
 				resp.Val = ps.v_a
 				resp.SeqNum = ps.n_a
 				resp.Iteration = msg.Iteration
 				ps.n_h = msg.SeqNum
 			} else { // reject
+				ps.logger.Printf("receiveProposal: reject proposal from server %s\n", msg.HostPort)
 				resp.Acc = false
 				resp.Iteration = -1
 			}
 			ps.accingMutex.Unlock()
 		} else if ps.iteration < msg.Iteration {
 			// acceptor is behind the proposing node. reject proposal
+			ps.logger.Printf("receiveProposal: shouldn't happen now. my iteration is %d while proposing node is at iteration %d\n", ps.iteration, msg.Iteration)
 			resp.Acc = false
 			resp.Iteration = ps.iteration
 			// TODO trigger no-op recovery process
@@ -255,6 +262,7 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 			// acceptor is beyond the proposing node
 			// reject proposal
 			resp.Acc = false
+			ps.logger.Printf("receiveProposal: shouldn't happen now. my iteration is %d while proposing node is at iteration %d\n", ps.iteration, msg.Iteration)
 			// retrieve committed value for that iteration and
 			// send to proposing node
 			resp.Val = ps.commitedVals[msg.Iteration]
@@ -264,6 +272,7 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 	} else {
 		// this server is leader. Prevent two leaders in one system
 		// leader must reject a prepare request of another node
+		ps.logger.Printf("receiveProposal: reject proposal from server %s since I am leader.\n", msg.HostPort)
 		resp.Acc = false
 		resp.Iteration = -1
 	}
@@ -292,9 +301,7 @@ func (ps *paxosStates) receiveProposal(msg p_message) {
 // response from an acceptor. It will react corresponding to
 // the message and make updates to the current state.
 func (ps *paxosStates) receivePrepareResponse(msg p_message) {
-	ps.logger.Printf("receivePrepareResponse: enter function\n")
 	ps.accedMutex.Lock()
-	ps.logger.Printf("receivePrepareResponse: get accedMutex\n")
 	if ps.phase == Prepare {
 		if msg.Acc {
 			ps.numAcc++
@@ -324,7 +331,6 @@ func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 			}
 		}
 
-		ps.logger.Printf("receivedPrepareResponse: numAcc is %d\n", ps.numAcc)
 		if 2*ps.numAcc > ps.numNodes { // proposal accepted
 			ps.prepChan <- true
 			ps.phase = Accept // prevent extra prepare-ok message from blocking the algorithm since the channel is not buffered
@@ -336,7 +342,6 @@ func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 		}
 	}
 
-	ps.logger.Printf("receivedPrepareResponse: release accedMutex.\n")
 	ps.accedMutex.Unlock()
 }
 
@@ -344,7 +349,7 @@ func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 // accept phase. It will return true when a majority of nodes
 // reply accept-ok. Otherwise, it will return false.
 func (ps *paxosStates) Accept(val string) (bool, error) {
-	ps.logger.Printf("Accept: enter accept function.\n")
+	ps.logger.Printf("Accept: enter function.\n")
 
 	// if there are value not yet committed, choose the most recent
 	// one. Since there is no other thread checking prev_v and prev_n,
@@ -357,6 +362,7 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 		// pick the value that client wants to commit
 		accept_val = val
 	}
+	ps.logger.Printf("Accept: value to be proposed is %s\n", accept_val)
 
 	// create accept message
 	msgB, err := ps.CreateAcceptMsg(accept_val)
@@ -364,12 +370,10 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 		ps.logger.Printf("Accept: error while creating accept message. %s\n", err)
 		return false, err
 	}
-	ps.logger.Printf("Accept: finished creating accept message.\n")
 
 	<-time.After(ps.test.AccSendDel)
 	// send accept message to the network
 	ps.broadCastMsg(msgB, "acc")
-	ps.logger.Printf("Accept: finished broadcasting.\n")
 
 	// wait for the majority to respond. Note that paxos doesn't
 	// guarantee liveness. Therefore, we might wait forever due
@@ -381,7 +385,7 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 	}
 	if acc {
 		// majority accepts
-		ps.logger.Printf("Accept: accept-ok from majority")
+		ps.logger.Printf("Accept: accept-ok from majority\n")
 		toReturn = true
 		// update v_a and n_a. Since we are the only thread updating,
 		// no need to grab lock
@@ -389,6 +393,7 @@ func (ps *paxosStates) Accept(val string) (bool, error) {
 		ps.n_a = ps.mySeqNum
 	} else {
 		// majority rejects. reset paxos state
+		ps.logger.Printf("Accept: accept-reject from majority\n")
 		ps.prep_v = ""
 		ps.prep_n = -1
 	}
@@ -461,9 +466,7 @@ func (ps *paxosStates) receiveAccept(msg p_message) {
 // response from an acceptor. It will react corresponding to
 // the message and make updates to the current state.
 func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
-	ps.logger.Printf("receiveAcceptResponse: enter function.\n")
 	ps.accedMutex.Lock()
-	ps.logger.Printf("receiveAcceptResponse: get accedMutex lock.\n")
 	if ps.phase == Accept {
 		if msg.SeqNum == ps.mySeqNum { // ignore old responses
 			if msg.Acc {
@@ -484,7 +487,6 @@ func (ps *paxosStates) receiveAcceptResponse(msg p_message) {
 		}
 	}
 
-	ps.logger.Printf("receiveAcceptResponse: release accedMutex.\n")
 	ps.accedMutex.Unlock()
 }
 
@@ -518,23 +520,24 @@ func (ps *paxosStates) commitVal() (string, error) {
 		// TODO should we return error here?
 		ps.logger.Printf("receiveCommit: error while executing query. %s\n", err)
 	}
-	ps.logger.Printf("commitVal: finished storing val into database.\n")
+
+	/* log commit */
+	ps.logger.Printf("commitVal: commit %s at iteration %d\n", val, ps.iteration)
+	ps.commitLogger.Printf("commit:" + val)
 
 	// reset phase variable to None
-	ps.logger.Printf("commitVal: start to reset phase variable.\n")
 	ps.prep_v = "" // no need to grab lock since we are the only one to change it
 	ps.prep_n = -1
 	ps.v_a = ""
 	ps.n_a = -1
 	ps.accedMutex.Lock()
-	ps.logger.Printf("commitVal: get accedMutex lock.\n")
 	ps.phase = None
 	ps.numAcc = 0
 	ps.numRej = 0
 	ps.commitedVals[ps.iteration] = val
 	ps.iteration += 1
 	ps.accedMutex.Unlock()
-	ps.logger.Printf("commitVal: finished reseting phase variable.\n")
+	ps.logger.Printf("commitVal: finished updating iteration number.\n")
 
 	return val, nil
 }
@@ -559,8 +562,27 @@ func (ps *paxosStates) CreateCommitMsg() ([]byte, error) {
 // This function is used by an acceptor to react to a commit
 // message. It will react corresponding to the current state.
 func (ps *paxosStates) receiveCommit(msg p_message) {
+	ps.accedMutex.Lock()
+	ps.accingMutex.Lock()
 	val := msg.Val
-	ps.logger.Printf("receiveCommit: value to be commited is %s\n", val)
+	ps.logger.Printf("receiveCommit: value to be commited is %s at iteration %d\n", val, ps.iteration)
+
+	/* log the commit */
+	ps.commitLogger.Printf("commit:" + val)
+
+	/* udpate iteration count */
+	ps.commitedVals[ps.iteration] = val
+	ps.iteration += 1
+
+	ps.logger.Printf("receiveCommit: finished upding iteration count.\n")
+
+	/* reset state */
+	ps.n_a = -1
+	ps.v_a = ""
+	ps.accingMutex.Unlock()
+	ps.accedMutex.Unlock()
+	ps.logger.Printf("receiveCommit: finished resetting state.\n")
+
 	// store the string into database
 	//TODO Need to deal with duplicates
 	db, err := sql.Open("sqlite3", ps.databaseFile)
@@ -574,12 +596,6 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 	if err != nil {
 		ps.logger.Printf("receiveCommit: error while executing query. %s\n", err)
 	}
-
-	/* udpate iteration count */
-	ps.accedMutex.Lock()
-	ps.commitedVals[ps.iteration] = val
-	ps.iteration += 1
-	ps.accedMutex.Unlock()
 }
 
 // This function does a commit. It is the only access point for server
@@ -592,9 +608,7 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 //     Returning error must gurantee that the value won't be committed
 //     in the future without retrying.
 func (ps *paxosStates) PaxosCommit(val string) (string, error) {
-	ps.logger.Printf("enter PaxosCommit\n")
 	prepSuccess, err := ps.Prepare()
-	ps.logger.Printf("PaxosCommit: finished prepare phase\n")
 	if err != nil {
 		return "", err
 	}
@@ -661,7 +675,6 @@ func (ps *paxosStates) CreateNoopMsg(iter int) ([]byte, error) {
 // unmarshalls and determines the type of a p_message
 // and calls the appropriate handler function
 func (ps *paxosStates) Interpret_message(marshalled []byte) {
-	ps.logger.Printf("Interpret_message: enter function\n")
 	var msg p_message
 	err := json.Unmarshal(marshalled, &msg)
 	if err != nil {
@@ -719,7 +732,6 @@ func (ps *paxosStates) sendMsg(port string, msgB []byte) error {
 			}
 		}
 	}
-	ps.logger.Printf("sendMsg: finished sending message to %s\n", port)
 	return nil
 }
 

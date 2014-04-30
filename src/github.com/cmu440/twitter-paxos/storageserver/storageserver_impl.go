@@ -92,17 +92,14 @@ func (ss *storageServer) parseConfigFile(config string,
 // The function will return the byte array for the message embeded
 // inside the high-level message, message type and error
 func (ss *storageServer) readMsg(conn net.Conn) ([]byte, int, error) {
-	ss.LOGV.Printf("readMsg: enter function\n")
 	reader := bufio.NewReader(conn)
 	msgBytes, err := reader.ReadBytes('\n')
-	ss.LOGV.Printf("readMsg: finished retrieving bytes from network\n")
 	if err != nil {
 		// error occurred while reading server message
 		fmt.Printf("readMsg: error while reading server message. %s\n", err)
 		return nil, -1, err
 	}
 	generalMsgB, msgType, err := ss.MsgHandler.RetrieveMsg(msgBytes)
-	ss.LOGV.Printf("readMsg: finished retriving general message\n")
 	if err != nil {
 		return nil, -1, err
 	} else {
@@ -256,7 +253,6 @@ func (ss *storageServer) pingServers() bool {
 
 // This is the handler to handle messages received by the server.
 func (ss *storageServer) networkHandler() {
-	ss.LOGV.Printf("networkHandler: start listening\n")
 	listener := ss.MsgListener
 
 	for {
@@ -267,7 +263,6 @@ func (ss *storageServer) networkHandler() {
 			return
 		} else {
 			// read server message
-			ss.LOGV.Printf("networkHandler: received a message\n")
 			msgB, msgType, errR := ss.readMsg(conn)
 
 			if errR != nil {
@@ -280,7 +275,6 @@ func (ss *storageServer) networkHandler() {
 					conn.Close()
 				case message.PAXOS:
 					// received a paxos message
-					ss.LOGV.Printf("networkHandler: received a paxos message\n")
 					go ss.PaxosHandler.Interpret_message(msgB)
 					conn.Close()
 				}
@@ -300,7 +294,6 @@ func (ss *storageServer) pingServers() bool {
 		if port == ss.PortRPC {
 			continue
 		}
-		ss.LOGV.Printf("ping server %s\n", port)
 		var fail bool = true
 		for index := 0; index < RETRY; index++ {
 			if rand.Float32() < ss.test.PingRate {
