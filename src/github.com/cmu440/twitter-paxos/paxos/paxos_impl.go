@@ -164,9 +164,9 @@ func NewPaxosStates(myHostPort string, nodes *list.List,
 // being successfully made. Otherwise, it will return false.
 func (ps *paxosStates) Prepare() (bool, error) {
 	// set phase and extract iteration number
-	ps.logger.Printf("Prepare: enter function\n")
 	var iter int
 	ps.accedMutex.Lock()
+	ps.logger.Printf("Prepare: enter function at iteration %d\n", ps.iteration)
 	ps.numAcc = 1
 	if ps.phase != None {
 		// server is busy handling the previous commit
@@ -338,6 +338,8 @@ func (ps *paxosStates) receivePrepareResponse(msg p_message) {
 				if msg.Iteration == ps.iteration {
 					// we are behind.
 					ps.commitedVals[ps.iteration] = msg.Val
+					ps.iteration += 1
+					ps.commitLogger.Printf("commit:" + msg.Val)
 				}
 			}
 		}
@@ -586,6 +588,7 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 	if ps.phase != None {
 		// this commite message might be late and the acceptor
 		// is already handling another client request. Ignore
+		ps.logger.Printf("receiveCommit: ignore commit message\n")
 		ps.accedMutex.Unlock()
 		return
 	} else {
@@ -640,10 +643,21 @@ func (ps *paxosStates) receiveCommit(msg p_message) {
 //     Returning error must gurantee that the value won't be committed
 //     in the future without retrying.
 func (ps *paxosStates) PaxosCommit(val string) (string, error) {
-	prepSuccess, err := ps.Prepare()
-	if err != nil {
-		return "", err
+	var prepSuccess bool = false
+	var err error
+
+	for {
+		prepSuccess, err = ps.Prepare()
+		if err != nil {
+			return "", err
+		}
+		if prepSuccess {
+			break
+		} else {
+			time.Sleep(100 * time.Millisecond)
+		}
 	}
+
 	if prepSuccess {
 		// Success in Prepare phase. Move on to Accept phase
 		accSuccess, err := ps.Accept(val)
